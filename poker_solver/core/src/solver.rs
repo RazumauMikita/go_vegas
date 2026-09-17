@@ -449,6 +449,7 @@ fn average_sb_equity(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::equity_cache::{combo_index, combo_label};
     use std::path::Path;
     use std::sync::OnceLock;
 
@@ -538,5 +539,311 @@ mod tests {
             huge_width <= short_width + 1e-9,
             "big SB should not push wider than short SB: huge={huge_width:.3} short={short_width:.3}"
         );
+    }
+
+    #[test]
+    fn hrc_ev_diagnostics() {
+        let cache = test_cache();
+        let ako = [Card::new(14, 0), Card::new(13, 1)];
+        let ako_idx = combo_index(ako) as usize;
+        assert_eq!(combo_label(ako_idx as u8), "AKo");
+
+        let payouts = [0.625, 0.375];
+        let input = SolverInput {
+            stacks: vec![1000.0, 1000.0],
+            payouts: payouts.to_vec(),
+            small_blind: 50.0,
+            big_blind: 100.0,
+            ante: 0.0,
+            button_index: 0,
+            max_iterations: 50,
+            tolerance: 0.001,
+        };
+        let ctx = HuContext::new(&input).expect("HU context");
+
+        let push_58 = top_combo_range(cache, 0.583);
+        let call_37 = top_combo_range(cache, 0.374);
+
+        println!("\n========== TEST 1: equity_vs_range AKo vs SB top 58% ==========");
+        let equity_list = cache.equity_vs_range(
+            ako,
+            &push_58
+                .iter()
+                .enumerate()
+                .filter(|(_, &freq)| freq > 0.0)
+                .map(|(idx, _)| idx as u8)
+                .collect::<Vec<_>>(),
+        );
+        let equity_weighted = cache.equity_vs_weighted_range(ako, &push_58);
+        println!("AKo index: {ako_idx}");
+        println!(
+            "cache.equity(AKo, AA)  = {:.4}  (expect ~0.12)",
+            cache.equity(ako_idx as u8, 0)
+        );
+        println!(
+            "cache.equity(AKo, KK)  = {:.4}  (expect ~0.34)",
+            cache.equity(ako_idx as u8, 1)
+        );
+        println!(
+            "cache.equity(AA, AKo)  = {:.4}  (expect ~0.88)",
+            cache.equity(0, ako_idx as u8)
+        );
+        println!(
+            "cache.equity(AKo, 32o) = {:.4}  (expect ~0.68)",
+            cache.equity(ako_idx as u8, 168)
+        );
+        println!("equity_vs_range (type list):     {equity_list:.4}");
+        println!("equity_vs_weighted_range:        {equity_weighted:.4}");
+        println!(
+            "SB top 58% type share:          {:.1}%",
+            type_share(&push_58) * 100.0
+        );
+        println!(
+            "SB top 58% combo share:         {:.1}%",
+            range_combo_share(&push_58) * 100.0
+        );
+
+        println!("\n========== TEST 2: EV_call BB AKo vs SB top 58% ==========");
+        let (p_sb_push, equity_call, ev_call) = call_stats(ako_idx, &push_58, &ctx, cache);
+        let user_fold = icm_equity(&[1050.0, 950.0], &payouts);
+        println!("equity (AKo vs SB push 58%):     {equity_call:.4}");
+        println!("P(SB push | BB has AKo):         {p_sb_push:.4}");
+        println!(
+            "ICM showdown BB win  [0,2000]:  {:.4}",
+            ctx.ev_bb_showdown_win
+        );
+        println!(
+            "ICM showdown BB lose [2000,0]:  {:.4}",
+            ctx.ev_bb_showdown_lose
+        );
+        println!("EV_call = eq*win + (1-eq)*lose: {ev_call:.6}");
+        println!(
+            "solver EV_fold BB (BB folds to shove, [1100,900]): {:.6}",
+            ctx.ev_bb_fold
+        );
+        println!(
+            "user   EV_fold BB icm([1050,950])[1]:               {:.6}",
+            user_fold[1]
+        );
+        println!(
+            "solver EV_call - EV_fold:          {:+.6}",
+            ev_call - ctx.ev_bb_fold
+        );
+        println!(
+            "user   EV_call - EV_fold:          {:+.6}",
+            ev_call - user_fold[1]
+        );
+        println!(
+            "needed equity vs [1100,900] ICM: {:.4}",
+            needed_equity(
+                ctx.ev_bb_fold,
+                ctx.ev_bb_showdown_win,
+                ctx.ev_bb_showdown_lose
+            )
+        );
+        println!(
+            "needed equity vs [1050,950] ICM: {:.4}",
+            needed_equity(
+                user_fold[1],
+                ctx.ev_bb_showdown_win,
+                ctx.ev_bb_showdown_lose
+            )
+        );
+
+        println!("\n========== TEST 3: EV_push SB AKo vs BB top 37% ==========");
+        let (p_call, p_fold, equity_push, ev_push) = push_stats(ako_idx, &call_37, &ctx, cache);
+        let user_sb_fold = icm_equity(&[950.0, 1050.0], &payouts);
+        println!("P(BB call | SB has AKo):          {p_call:.4}");
+        println!("P(BB fold | SB has AKo):          {p_fold:.4}");
+        println!("equity (AKo vs BB call 37%):      {equity_push:.4}");
+        println!(
+            "ICM SB wins shove [2000,0]:      {:.4}",
+            ctx.ev_sb_showdown_win
+        );
+        println!(
+            "ICM SB loses shove [0,2000]:     {:.4}",
+            ctx.ev_sb_showdown_lose
+        );
+        println!("ICM BB folds [1100,900] SB:      {:.4}", ctx.ev_sb_bb_folds);
+        println!("EV_push (solver formula):         {ev_push:.6}");
+        println!(
+            "solver EV_fold SB (SB folds, [950,1050]): {:.6}",
+            ctx.ev_sb_fold
+        );
+        println!(
+            "user   EV_fold SB icm([950,1050])[0]:     {:.6}",
+            user_sb_fold[0]
+        );
+        println!(
+            "solver EV_push - EV_fold:          {:+.6}",
+            ev_push - ctx.ev_sb_fold
+        );
+
+        println!("\n========== TEST 4: actual solver ranges ==========");
+        let output = solve(&input, cache);
+        let ako_push = output.push_ranges[0][ako_idx];
+        let ako_call = output.call_ranges[1][ako_idx];
+        println!(
+            "iterations: {}  converged: {}",
+            output.iterations_used, output.converged
+        );
+        println!("AKo push_ranges[SB]: {ako_push:.4}");
+        println!("AKo call_ranges[BB]: {ako_call:.4}");
+        let equity_vs_solver_push = cache.equity_vs_weighted_range(ako, &output.push_ranges[0]);
+        println!("AKo equity vs solver SB push:  {equity_vs_solver_push:.4}");
+        println!(
+            "push type share (sum/169):      {:.1}%  (HRC ~58.3%)",
+            type_share(&output.push_ranges[0]) * 100.0
+        );
+        println!(
+            "call type share (sum/169):      {:.1}%  (HRC ~37.4%)",
+            type_share(&output.call_ranges[1]) * 100.0
+        );
+        println!(
+            "push combo share:               {:.1}%",
+            range_combo_share(&output.push_ranges[0]) * 100.0
+        );
+        println!(
+            "call combo share:               {:.1}%",
+            range_combo_share(&output.call_ranges[1]) * 100.0
+        );
+        println!(
+            "solver ICM: fold_sb={:.4} fold_bb={:.4} sb_bb_folds={:.4}",
+            ctx.ev_sb_fold, ctx.ev_bb_fold, ctx.ev_sb_bb_folds
+        );
+        println!(
+            "solver ICM showdown: sb_win={:.4} sb_lose={:.4} bb_win={:.4} bb_lose={:.4}",
+            ctx.ev_sb_showdown_win,
+            ctx.ev_sb_showdown_lose,
+            ctx.ev_bb_showdown_win,
+            ctx.ev_bb_showdown_lose
+        );
+
+        let ev_call_vs_solver_push = ev_call_bb(ako_idx, &output.push_ranges[0], &ctx, cache);
+        let ev_push_vs_solver_call = ev_push_sb(ako_idx, &output.call_ranges[1], &ctx, cache);
+        println!(
+            "AKo EV_call vs solver push: {:.6} vs fold {:.6} diff {:+.6}",
+            ev_call_vs_solver_push,
+            ctx.ev_bb_fold,
+            ev_call_vs_solver_push - ctx.ev_bb_fold
+        );
+        println!(
+            "AKo EV_push vs solver call: {:.6} vs fold {:.6} diff {:+.6}",
+            ev_push_vs_solver_call,
+            ctx.ev_sb_fold,
+            ev_push_vs_solver_call - ctx.ev_sb_fold
+        );
+    }
+
+    fn type_share(range: &[f64; HAND_TYPES]) -> f64 {
+        range.iter().sum::<f64>() / HAND_TYPES as f64
+    }
+
+    fn top_combo_range(cache: &EquityCache, target_combo_share: f64) -> [f64; HAND_TYPES] {
+        let mut ranked: Vec<(usize, f64, f64)> = (0..HAND_TYPES)
+            .map(|idx| {
+                let combos = expand_combo(idx as u8).len() as f64;
+                let vs_random = equity_vs_random(cache, idx as u8);
+                (idx, vs_random, combos)
+            })
+            .collect();
+        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        let total_combos: f64 = ranked.iter().map(|item| item.2).sum();
+        let mut range = [0.0; HAND_TYPES];
+        let mut used = 0.0;
+        for &(idx, _, combos) in &ranked {
+            if used / total_combos >= target_combo_share {
+                break;
+            }
+            range[idx] = 1.0;
+            used += combos;
+        }
+        range
+    }
+
+    fn equity_vs_random(cache: &EquityCache, hero: u8) -> f64 {
+        let mut weighted = 0.0;
+        let mut total = 0.0;
+        for villain in 0..HAND_TYPES as u8 {
+            let weight = expand_combo(villain).len() as f64;
+            weighted += weight * cache.equity(hero, villain);
+            total += weight;
+        }
+        weighted / total
+    }
+
+    fn needed_equity(ev_fold: f64, ev_win: f64, ev_lose: f64) -> f64 {
+        if (ev_win - ev_lose).abs() < 1e-12 {
+            return 1.0;
+        }
+        (ev_fold - ev_lose) / (ev_win - ev_lose)
+    }
+
+    fn call_stats(
+        hand_idx: usize,
+        push_range: &[f64; HAND_TYPES],
+        ctx: &HuContext,
+        cache: &EquityCache,
+    ) -> (f64, f64, f64) {
+        let combo_count = ctx.combos[hand_idx].len() as f64;
+        let mut p_push = 0.0;
+        let mut equity = 0.0;
+        for combo_idx in 0..ctx.combos[hand_idx].len() {
+            let unblocked = &ctx.unblocked[hand_idx][combo_idx];
+            let mut live = 0.0;
+            let mut push_w = 0.0;
+            let mut eq_w = 0.0;
+            for (villain_idx, &count) in unblocked.iter().enumerate() {
+                let live_f = count as f64;
+                live += live_f;
+                let weight = live_f * push_range[villain_idx];
+                if weight > 0.0 {
+                    push_w += weight;
+                    eq_w += weight * cache.equity(hand_idx as u8, villain_idx as u8);
+                }
+            }
+            p_push += if live > 0.0 { push_w / live } else { 0.0 };
+            equity += if push_w > 0.0 { eq_w / push_w } else { 0.5 };
+        }
+        p_push /= combo_count;
+        equity /= combo_count;
+        let ev_call = equity * ctx.ev_bb_showdown_win + (1.0 - equity) * ctx.ev_bb_showdown_lose;
+        (p_push, equity, ev_call)
+    }
+
+    fn push_stats(
+        hand_idx: usize,
+        call_range: &[f64; HAND_TYPES],
+        ctx: &HuContext,
+        cache: &EquityCache,
+    ) -> (f64, f64, f64, f64) {
+        let combo_count = ctx.combos[hand_idx].len() as f64;
+        let mut p_call = 0.0;
+        let mut equity = 0.0;
+        for combo_idx in 0..ctx.combos[hand_idx].len() {
+            let unblocked = &ctx.unblocked[hand_idx][combo_idx];
+            let mut live = 0.0;
+            let mut call_w = 0.0;
+            let mut eq_w = 0.0;
+            for (villain_idx, &count) in unblocked.iter().enumerate() {
+                let live_f = count as f64;
+                live += live_f;
+                let weight = live_f * call_range[villain_idx];
+                if weight > 0.0 {
+                    call_w += weight;
+                    eq_w += weight * cache.equity(hand_idx as u8, villain_idx as u8);
+                }
+            }
+            p_call += if live > 0.0 { call_w / live } else { 0.0 };
+            equity += if call_w > 0.0 { eq_w / call_w } else { 0.5 };
+        }
+        p_call /= combo_count;
+        equity /= combo_count;
+        let p_fold = 1.0 - p_call;
+        let ev_showdown =
+            equity * ctx.ev_sb_showdown_win + (1.0 - equity) * ctx.ev_sb_showdown_lose;
+        let ev_push = p_fold * ctx.ev_sb_bb_folds + p_call * ev_showdown;
+        (p_call, p_fold, equity, ev_push)
     }
 }

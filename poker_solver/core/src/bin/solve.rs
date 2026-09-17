@@ -2,7 +2,9 @@ use std::env;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use poker_core::{combo_index, combo_label, Card, EquityCache, SolverInput, SolverOutput};
+use poker_core::{
+    combo_index, combo_label, index_to_ranks, Card, EquityCache, SolverInput, SolverOutput,
+};
 
 fn main() -> ExitCode {
     match run(env::args().skip(1).collect()) {
@@ -209,6 +211,9 @@ fn print_output(input: &SolverInput, output: &SolverOutput) {
     println!("SB $EV: {:.2}%", output.equities[sb] * 100.0);
     println!("BB $EV: {:.2}%", output.equities[bb] * 100.0);
     println!();
+    print_range_share("SB push", &output.push_ranges[sb]);
+    print_range_share("BB call", &output.call_ranges[bb]);
+    println!();
 
     println!("SB top-20 push hands:");
     print_top_hands(&output.push_ranges[sb], 20);
@@ -222,6 +227,37 @@ fn print_output(input: &SolverInput, output: &SolverOutput) {
     println!();
     println!("BB call 13x13 (A..2, suited above diagonal, offsuit below):");
     print_matrix(&output.call_ranges[bb]);
+}
+
+fn print_range_share(label: &str, range: &[f64; 169]) {
+    let combo_share = combo_share(range);
+    let type_share = range.iter().sum::<f64>() / range.len() as f64;
+    println!(
+        "{label}: combo-share {:.1}%  type-share {:.1}%",
+        combo_share * 100.0,
+        type_share * 100.0
+    );
+}
+
+fn combo_share(range: &[f64; 169]) -> f64 {
+    const TOTAL_COMBOS: f64 = 1326.0;
+    let weighted: f64 = range
+        .iter()
+        .enumerate()
+        .map(|(idx, &freq)| freq.clamp(0.0, 1.0) * combo_weight(idx as u8) as f64)
+        .sum();
+    weighted / TOTAL_COMBOS
+}
+
+fn combo_weight(idx: u8) -> u8 {
+    let (high, low, suited) = index_to_ranks(idx);
+    if high == low {
+        6
+    } else if suited {
+        4
+    } else {
+        12
+    }
 }
 
 fn print_top_hands(range: &[f64; 169], count: usize) {
