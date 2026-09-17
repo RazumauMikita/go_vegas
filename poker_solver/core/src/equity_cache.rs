@@ -380,13 +380,11 @@ fn evaluate_seven(hole: [Card; 2], board: [Card; 5]) -> crate::hand_evaluator::H
 
 fn available_cards(dead: &[Card]) -> Vec<Card> {
     let mut deck = Vec::with_capacity(48);
-    'outer: for suit in 0..4 {
+    for suit in 0..4 {
         for rank in Card::MIN_RANK..=Card::MAX_RANK {
             let card = Card::new(rank, suit);
-            for dead_card in dead {
-                if card == *dead_card {
-                    continue 'outer;
-                }
+            if dead.iter().any(|dead_card| *dead_card == card) {
+                continue;
             }
             deck.push(card);
         }

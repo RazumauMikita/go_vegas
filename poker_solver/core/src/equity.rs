@@ -166,13 +166,11 @@ fn has_duplicates(cards: &[Card]) -> bool {
 
 fn available_cards(dead: &[Card]) -> Vec<Card> {
     let mut deck = Vec::with_capacity(52);
-    'outer: for suit in 0..4 {
+    for suit in 0..4 {
         for rank in Card::MIN_RANK..=Card::MAX_RANK {
             let card = Card::new(rank, suit);
-            for dead_card in dead {
-                if card == *dead_card {
-                    continue 'outer;
-                }
+            if dead.iter().any(|dead_card| *dead_card == card) {
+                continue;
             }
             deck.push(card);
         }
@@ -596,5 +594,28 @@ mod tests {
         for result in exact {
             assert!((result.equity() - 1.0 / 3.0).abs() < 0.001);
         }
+    }
+
+    #[test]
+    fn flop_aa_vs_kk_villain_has_equity() {
+        fn c(s: &str) -> Card {
+            Card::from_str(s).unwrap()
+        }
+
+        let ranges = [vec![[c("Ah"), c("Ad")]], vec![[c("Kh"), c("Kd")]]];
+        let board = vec![c("Ts"), c("7d"), c("2c")];
+        let results = equity_exact(&ranges, &board);
+
+        assert!(
+            results[1].equity() > 0.05,
+            "villain equity {} hero win {}",
+            results[1].equity(),
+            results[0].win
+        );
+        assert!(
+            results[0].equity() < 0.95,
+            "hero equity {}",
+            results[0].equity()
+        );
     }
 }
