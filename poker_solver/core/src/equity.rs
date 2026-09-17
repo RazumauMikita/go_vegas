@@ -169,7 +169,7 @@ fn available_cards(dead: &[Card]) -> Vec<Card> {
     for suit in 0..4 {
         for rank in Card::MIN_RANK..=Card::MAX_RANK {
             let card = Card::new(rank, suit);
-            if dead.iter().any(|dead_card| *dead_card == card) {
+            if dead.contains(&card) {
                 continue;
             }
             deck.push(card);

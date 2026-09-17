@@ -15,6 +15,9 @@ const COMBO_COUNT: usize = 169;
 const TABLE_LEN: usize = COMBO_COUNT * COMBO_COUNT;
 const CACHE_FILE_BYTES: usize = TABLE_LEN * 4;
 
+/// Число уникальных пар (i, j) где i <= j.
+pub const UNIQUE_PAIR_COUNT: usize = COMBO_COUNT * (COMBO_COUNT + 1) / 2;
+
 /// Таблица префлоп-эквити hero против villain для всех 169×169 типов рук.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EquityCache {
@@ -34,27 +37,16 @@ impl EquityCache {
     where
         F: Fn(u64, Instant) + Sync,
     {
-        let completed = AtomicU64::new(0);
-        let started = Instant::now();
-        let report_every = (TABLE_LEN / 20).max(1) as u64;
+        Self::generate_pairs_with_progress(iterations, UNIQUE_PAIR_COUNT, progress)
+    }
 
-        let values: Vec<f32> = (0..TABLE_LEN)
-            .into_par_iter()
-            .map(|flat| {
-                let h1 = (flat / COMBO_COUNT) as u8;
-                let h2 = (flat % COMBO_COUNT) as u8;
-                let equity = pair_equity(h1, h2, iterations) as f32;
-
-                let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
-                if done == TABLE_LEN as u64 || done.is_multiple_of(report_every) {
-                    progress(done, started);
-                }
-
-                equity
-            })
-            .collect();
-
-        Self { values }
+    /// Сгенерировать первые `pair_count` уникальных пар (i, j), где i <= j.
+    pub fn generate_sample_with_progress<F>(iterations: u64, pair_count: usize, progress: F) -> Self
+    where
+        F: Fn(u64, Instant) + Sync,
+    {
+        let limit = pair_count.min(UNIQUE_PAIR_COUNT);
+        Self::generate_pairs_with_progress(iterations, limit, progress)
     }
 
     /// Сгенерировать кэш только для указанных пар индексов.
@@ -65,7 +57,8 @@ impl EquityCache {
         let mut values = vec![0.0f32; TABLE_LEN];
 
         for &(h1, h2) in pairs {
-            values[table_index(h1, h2)] = pair_equity(h1, h2, iterations) as f32;
+            let (low, high) = canonical_pair(h1, h2);
+            values[table_index(low, high)] = pair_equity(low, high, iterations) as f32;
         }
 
         Self { values }
@@ -103,8 +96,15 @@ impl EquityCache {
     }
 
     /// Эквити руки `h1` против руки `h2` (индексы 0..169).
+    ///
+    /// Для пар хранится только верхний треугольник: при `h1 > h2` возвращается
+    /// `1.0 - equity(h2, h1)`.
     pub fn equity(&self, h1: u8, h2: u8) -> f64 {
-        self.values[table_index(h1, h2)] as f64
+        if h1 <= h2 {
+            self.values[table_index(h1, h2)] as f64
+        } else {
+            1.0 - self.values[table_index(h2, h1)] as f64
+        }
     }
 
     /// Эквити конкретной пары карт против диапазона 169-индексов.
@@ -134,6 +134,37 @@ impl EquityCache {
         }
 
         weighted_equity / total_weight
+    }
+
+    fn generate_pairs_with_progress<F>(iterations: u64, pair_limit: usize, progress: F) -> Self
+    where
+        F: Fn(u64, Instant) + Sync,
+    {
+        let pairs = unique_pairs(pair_limit);
+        let total = pairs.len() as u64;
+        let completed = AtomicU64::new(0);
+        let started = Instant::now();
+        let report_every = (total / 20).max(1);
+
+        let mut values = vec![0.0f32; TABLE_LEN];
+
+        let computed: Vec<(usize, f32)> = pairs
+            .par_iter()
+            .map(|&(h1, h2)| {
+                let equity = pair_equity(h1, h2, iterations) as f32;
+                let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                if done == total || done.is_multiple_of(report_every) {
+                    progress(done, started);
+                }
+                (table_index(h1, h2), equity)
+            })
+            .collect();
+
+        for (index, equity) in computed {
+            values[index] = equity;
+        }
+
+        Self { values }
     }
 }
 
@@ -190,6 +221,27 @@ pub fn expand_combo(idx: u8) -> Vec<[Card; 2]> {
 
 fn table_index(h1: u8, h2: u8) -> usize {
     h1 as usize * COMBO_COUNT + h2 as usize
+}
+
+fn canonical_pair(h1: u8, h2: u8) -> (u8, u8) {
+    if h1 <= h2 {
+        (h1, h2)
+    } else {
+        (h2, h1)
+    }
+}
+
+fn unique_pairs(limit: usize) -> Vec<(u8, u8)> {
+    let mut pairs = Vec::with_capacity(limit.min(UNIQUE_PAIR_COUNT));
+    'outer: for i in 0..COMBO_COUNT as u8 {
+        for j in i..COMBO_COUNT as u8 {
+            pairs.push((i, j));
+            if pairs.len() >= limit {
+                break 'outer;
+            }
+        }
+    }
+    pairs
 }
 
 fn rank_to_row(rank: u8) -> u8 {
@@ -383,7 +435,7 @@ fn available_cards(dead: &[Card]) -> Vec<Card> {
     for suit in 0..4 {
         for rank in Card::MIN_RANK..=Card::MAX_RANK {
             let card = Card::new(rank, suit);
-            if dead.iter().any(|dead_card| *dead_card == card) {
+            if dead.contains(&card) {
                 continue;
             }
             deck.push(card);
@@ -467,6 +519,16 @@ mod tests {
         assert_eq!(expand_combo(13).len(), 4);
         assert_eq!(expand_combo(91).len(), 12);
         assert_eq!(expand_combo(168).len(), 12);
+    }
+
+    #[test]
+    fn symmetry() {
+        let cache = EquityCache::generate_subset(&[(0, 1)], 10_000);
+        let sum = cache.equity(1, 0) + cache.equity(0, 1);
+        assert!(
+            (sum - 1.0).abs() < 0.01,
+            "expected equity(0,1) + equity(1,0) ~= 1.0, got {sum}"
+        );
     }
 
     #[test]
