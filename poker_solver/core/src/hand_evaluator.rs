@@ -78,48 +78,72 @@ fn evaluate_five(cards: &[Card; 5]) -> HandRank {
         counts[rank as usize] += 1;
     }
 
-    let mut groups: Vec<(u8, u8)> = (2..=14)
-        .filter(|&rank| counts[rank as usize] > 0)
-        .map(|rank| (counts[rank as usize], rank))
-        .collect();
-
-    groups.sort_unstable_by(|a, b| b.cmp(a).then_with(|| b.1.cmp(&a.1)));
-
-    let pattern: Vec<u8> = groups.iter().map(|(count, _)| *count).collect();
-    let ordered_ranks: Vec<u8> = groups.iter().map(|(_, rank)| *rank).collect();
-
-    match pattern.as_slice() {
-        [4, 1] => encode(HandCategory::FourOfAKind, &ordered_ranks),
-        [3, 2] => encode(HandCategory::FullHouse, &ordered_ranks),
-        [3, 1, 1] => encode(HandCategory::ThreeOfAKind, &ordered_ranks),
-        [2, 2, 1] => encode(HandCategory::TwoPair, &ordered_ranks),
-        [2, 1, 1, 1] => encode(HandCategory::OnePair, &ordered_ranks),
-        _ if is_flush => encode(HandCategory::Flush, &ranks),
-        _ if is_straight => encode(HandCategory::Straight, &[straight_high.unwrap()]),
-        _ => encode(HandCategory::HighCard, &ranks),
-    }
-}
-
-fn straight_high_rank(sorted_desc: &[u8; 5]) -> Option<u8> {
-    let unique: Vec<u8> = sorted_desc
-        .iter()
-        .copied()
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-
-    if unique.len() < 5 {
-        return None;
-    }
-
-    for window in unique.windows(5) {
-        if window[0] - window[4] == 4 {
-            return Some(window[0]);
+    let mut groups = [(0u8, 0u8); 5];
+    let mut group_len = 0usize;
+    for rank in 2..=14 {
+        let count = counts[rank as usize];
+        if count > 0 {
+            groups[group_len] = (count, rank);
+            group_len += 1;
         }
     }
 
-    if unique.ends_with(&[5, 4, 3, 2]) && unique.contains(&14) {
+    groups[..group_len].sort_unstable_by(|a, b| b.cmp(a).then_with(|| b.1.cmp(&a.1)));
+
+    if group_len > 0 && groups[0].0 == 4 {
+        return encode(HandCategory::FourOfAKind, &[groups[0].1, groups[1].1]);
+    }
+    if group_len > 1 && groups[0].0 == 3 && groups[1].0 == 2 {
+        return encode(HandCategory::FullHouse, &[groups[0].1, groups[1].1]);
+    }
+    if group_len > 2 && groups[0].0 == 3 {
+        return encode(
+            HandCategory::ThreeOfAKind,
+            &[groups[0].1, groups[1].1, groups[2].1],
+        );
+    }
+    if group_len > 2 && groups[0].0 == 2 && groups[1].0 == 2 {
+        return encode(
+            HandCategory::TwoPair,
+            &[groups[0].1, groups[1].1, groups[2].1],
+        );
+    }
+    if group_len > 3 && groups[0].0 == 2 {
+        return encode(
+            HandCategory::OnePair,
+            &[groups[0].1, groups[1].1, groups[2].1, groups[3].1],
+        );
+    }
+    if is_flush {
+        return encode(HandCategory::Flush, &ranks);
+    }
+    if is_straight {
+        return encode(HandCategory::Straight, &[straight_high.unwrap()]);
+    }
+
+    encode(HandCategory::HighCard, &ranks)
+}
+
+fn straight_high_rank(sorted_desc: &[u8; 5]) -> Option<u8> {
+    let mut unique = [0u8; 5];
+    let mut unique_len = 0usize;
+
+    for &rank in sorted_desc {
+        if unique_len == 0 || unique[unique_len - 1] != rank {
+            unique[unique_len] = rank;
+            unique_len += 1;
+        }
+    }
+
+    if unique_len < 5 {
+        return None;
+    }
+
+    if unique[0] - unique[4] == 4 {
+        return Some(unique[0]);
+    }
+
+    if unique[0] == 14 && unique[1] == 5 && unique[2] == 4 && unique[3] == 3 && unique[4] == 2 {
         return Some(5);
     }
 

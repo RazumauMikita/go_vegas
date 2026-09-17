@@ -5,3 +5,7 @@ edition = "2021"
 
 [lib]
 name = "poker_core"
+
+[dependencies]
+rayon = "1.10"
+
