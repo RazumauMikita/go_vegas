@@ -137,6 +137,41 @@ impl EquityCache {
         weighted_equity / total_weight
     }
 
+    /// Эквити конкретной пары карт против взвешенного 169-диапазона.
+    ///
+    /// `frequencies[i]` — частота 0..1 для типа руки `i`.
+    /// Комбинации, пересекающиеся с `h1` по картам, исключаются.
+    pub fn equity_vs_weighted_range(&self, h1: [Card; 2], frequencies: &[f64; 169]) -> f64 {
+        let hero_index = combo_index(h1);
+        let mut weighted_equity = 0.0;
+        let mut total_weight = 0.0;
+
+        for (range_index, &frequency) in frequencies.iter().enumerate() {
+            if frequency <= 0.0 {
+                continue;
+            }
+
+            let live = expand_combo(range_index as u8)
+                .iter()
+                .filter(|combo| !hands_overlap(h1, **combo))
+                .count() as f64;
+            let weight = live * frequency;
+
+            if weight == 0.0 {
+                continue;
+            }
+
+            weighted_equity += weight * self.equity(hero_index, range_index as u8);
+            total_weight += weight;
+        }
+
+        if total_weight == 0.0 {
+            return 0.0;
+        }
+
+        weighted_equity / total_weight
+    }
+
     fn generate_pairs_with_progress<F>(iterations: u64, pair_limit: usize, progress: F) -> Self
     where
         F: Fn(u64, Instant) + Sync,
@@ -203,6 +238,20 @@ pub fn index_to_ranks(idx: u8) -> (u8, u8, bool) {
     let position = idx - 91;
     let (row, col) = offsuit_row_col(position);
     (row_to_rank(col), row_to_rank(row), false)
+}
+
+/// Человекочитаемая метка 169-индекса: `AA`, `AKs`, `AKo`.
+pub fn combo_label(idx: u8) -> String {
+    let (high, low, suited) = index_to_ranks(idx);
+    let high_char = Card::new(high, 0).rank_char();
+    let low_char = Card::new(low, 0).rank_char();
+    if high == low {
+        format!("{high_char}{low_char}")
+    } else if suited {
+        format!("{high_char}{low_char}s")
+    } else {
+        format!("{high_char}{low_char}o")
+    }
 }
 
 /// Развернуть 169-индекс в конкретные двухкарточные комбинации.
@@ -368,7 +417,7 @@ fn order_hand(hand: [Card; 2]) -> [Card; 2] {
     }
 }
 
-fn hands_overlap(h1: [Card; 2], h2: [Card; 2]) -> bool {
+pub(crate) fn hands_overlap(h1: [Card; 2], h2: [Card; 2]) -> bool {
     h1[0] == h2[0] || h1[0] == h2[1] || h1[1] == h2[0] || h1[1] == h2[1]
 }
 
