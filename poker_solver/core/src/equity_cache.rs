@@ -54,11 +54,12 @@ impl EquityCache {
     /// Используется в тестах, чтобы не считать весь 169×169.
     /// Незаполненные ячейки остаются равными `0.0`.
     pub fn generate_subset(pairs: &[(u8, u8)], iterations: u64) -> Self {
+        let combos: Vec<Vec<[Card; 2]>> = (0..COMBO_COUNT as u8).map(expand_combo).collect();
         let mut values = vec![0.0f32; TABLE_LEN];
 
         for &(h1, h2) in pairs {
             let (low, high) = canonical_pair(h1, h2);
-            values[table_index(low, high)] = pair_equity(low, high, iterations) as f32;
+            values[table_index(low, high)] = pair_equity(&combos, low, high, iterations) as f32;
         }
 
         Self { values }
@@ -144,14 +145,15 @@ impl EquityCache {
         let total = pairs.len() as u64;
         let completed = AtomicU64::new(0);
         let started = Instant::now();
-        let report_every = (total / 20).max(1);
+        let report_every = 100.max(total / 20);
 
+        let combos: Vec<Vec<[Card; 2]>> = (0..COMBO_COUNT as u8).map(expand_combo).collect();
         let mut values = vec![0.0f32; TABLE_LEN];
 
         let computed: Vec<(usize, f32)> = pairs
             .par_iter()
             .map(|&(h1, h2)| {
-                let equity = pair_equity(h1, h2, iterations) as f32;
+                let equity = pair_equity(&combos, h1, h2, iterations) as f32;
                 let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
                 if done == total || done.is_multiple_of(report_every) {
                     progress(done, started);
@@ -370,13 +372,13 @@ fn hands_overlap(h1: [Card; 2], h2: [Card; 2]) -> bool {
     h1[0] == h2[0] || h1[0] == h2[1] || h1[1] == h2[0] || h1[1] == h2[1]
 }
 
-fn pair_equity(h1: u8, h2: u8, iterations: u64) -> f64 {
-    let combos_h1 = expand_combo(h1);
-    let combos_h2 = expand_combo(h2);
+fn build_matchups(combos: &[Vec<[Card; 2]>], h1: u8, h2: u8) -> Vec<([Card; 2], [Card; 2])> {
+    let combos_h1 = &combos[h1 as usize];
+    let combos_h2 = &combos[h2 as usize];
     let mut matchups = Vec::new();
 
-    for combo_h1 in &combos_h1 {
-        for combo_h2 in &combos_h2 {
+    for combo_h1 in combos_h1 {
+        for combo_h2 in combos_h2 {
             if hands_overlap(*combo_h1, *combo_h2) {
                 continue;
             }
@@ -384,17 +386,32 @@ fn pair_equity(h1: u8, h2: u8, iterations: u64) -> f64 {
         }
     }
 
+    matchups
+}
+
+fn pair_equity(combos: &[Vec<[Card; 2]>], h1: u8, h2: u8, iterations: u64) -> f64 {
+    let matchups = build_matchups(combos, h1, h2);
+
     if matchups.is_empty() {
         return 0.5;
     }
 
-    let total: f64 = matchups
-        .par_iter()
-        .map(|(combo_h1, combo_h2)| monte_carlo_equity(*combo_h1, *combo_h2, iterations))
-        .sum();
+    let total: f64 = if matchups.len() >= 8 {
+        matchups
+            .par_iter()
+            .map(|(combo_h1, combo_h2)| monte_carlo_equity(*combo_h1, *combo_h2, iterations))
+            .sum()
+    } else {
+        matchups
+            .iter()
+            .map(|(combo_h1, combo_h2)| monte_carlo_equity(*combo_h1, *combo_h2, iterations))
+            .sum()
+    };
 
     total / matchups.len() as f64
 }
+
+const AVAILABLE_CARD_COUNT: usize = 48;
 
 fn monte_carlo_equity(hero: [Card; 2], villain: [Card; 2], iterations: u64) -> f64 {
     if iterations == 0 {
@@ -402,13 +419,17 @@ fn monte_carlo_equity(hero: [Card; 2], villain: [Card; 2], iterations: u64) -> f
     }
 
     let dead = [hero[0], hero[1], villain[0], villain[1]];
-    let available = available_cards(&dead);
+    let available = build_available_cards(dead);
     let mut rng = Rng::new(0xD1B5_4A32_D192_ED03 ^ hash_hand(hero, villain));
     let mut win = 0.0;
     let mut tie = 0.0;
+    let mut indices = [0_u8; AVAILABLE_CARD_COUNT];
+    for (slot, index) in indices.iter_mut().enumerate() {
+        *index = slot as u8;
+    }
 
     for _ in 0..iterations {
-        let board = sample_board(&available, &mut rng);
+        let board = sample_board(&available, &mut indices, &mut rng);
         let hero_rank = evaluate_seven(hero, board);
         let villain_rank = evaluate_seven(villain, board);
 
@@ -430,33 +451,42 @@ fn evaluate_seven(hole: [Card; 2], board: [Card; 5]) -> crate::hand_evaluator::H
     evaluate_hand(&cards)
 }
 
-fn available_cards(dead: &[Card]) -> Vec<Card> {
-    let mut deck = Vec::with_capacity(48);
+fn build_available_cards(dead: [Card; 4]) -> [Card; AVAILABLE_CARD_COUNT] {
+    let mut available = [Card::new(2, 0); AVAILABLE_CARD_COUNT];
+    let mut slot = 0;
+
     for suit in 0..4 {
         for rank in Card::MIN_RANK..=Card::MAX_RANK {
             let card = Card::new(rank, suit);
-            if dead.contains(&card) {
+            if card == dead[0] || card == dead[1] || card == dead[2] || card == dead[3] {
                 continue;
             }
-            deck.push(card);
+            available[slot] = card;
+            slot += 1;
         }
     }
-    deck
+
+    available
 }
 
-fn sample_board(available: &[Card], rng: &mut Rng) -> [Card; 5] {
-    let mut indices: Vec<usize> = (0..available.len()).collect();
-    let mut board = [Card::new(2, 0); 5];
-
-    for (slot, board_card) in board.iter_mut().enumerate() {
-        let remaining = indices.len() - slot;
-        let pick = rng.gen_range(remaining);
-        let chosen = indices.len() - slot - 1;
-        indices.swap(pick, chosen);
-        *board_card = available[indices[chosen]];
+fn sample_board(
+    available: &[Card; AVAILABLE_CARD_COUNT],
+    indices: &mut [u8; AVAILABLE_CARD_COUNT],
+    rng: &mut Rng,
+) -> [Card; 5] {
+    for slot in 0..5 {
+        let remaining = AVAILABLE_CARD_COUNT - slot;
+        let pick = rng.gen_range(remaining) + slot;
+        indices.swap(slot, pick);
     }
 
-    board
+    [
+        available[indices[0] as usize],
+        available[indices[1] as usize],
+        available[indices[2] as usize],
+        available[indices[3] as usize],
+        available[indices[4] as usize],
+    ]
 }
 
 fn hash_hand(hero: [Card; 2], villain: [Card; 2]) -> u64 {
@@ -519,6 +549,32 @@ mod tests {
         assert_eq!(expand_combo(13).len(), 4);
         assert_eq!(expand_combo(91).len(), 12);
         assert_eq!(expand_combo(168).len(), 12);
+    }
+
+    #[test]
+    fn pair_work_breakdown_aa_vs_kk() {
+        let combos: Vec<Vec<[Card; 2]>> = (0..COMBO_COUNT as u8).map(expand_combo).collect();
+        let matchups = build_matchups(&combos, 0, 1);
+
+        let setup_started = Instant::now();
+        let _ = build_matchups(&combos, 0, 1);
+        let setup_elapsed = setup_started.elapsed();
+
+        let mc_started = Instant::now();
+        let total: f64 = matchups
+            .iter()
+            .map(|(hero, villain)| monte_carlo_equity(*hero, *villain, 10_000))
+            .sum();
+        let mc_elapsed = mc_started.elapsed();
+        let _average = total / matchups.len() as f64;
+
+        eprintln!(
+            "AA vs KK: matchups={}, setup={:?}, monte_carlo={:?}",
+            matchups.len(),
+            setup_elapsed,
+            mc_elapsed
+        );
+        assert!(mc_elapsed > setup_elapsed);
     }
 
     #[test]

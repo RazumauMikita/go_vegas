@@ -4,6 +4,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use poker_core::{EquityCache, UNIQUE_PAIR_COUNT};
+use rayon::current_num_threads;
 
 fn main() -> ExitCode {
     match run(env::args().skip(1).collect()) {
@@ -33,6 +34,8 @@ fn run(args: Vec<String>) -> Result<(), String> {
         "Generating equity cache with {} iterations per pair ({} unique pairs)...",
         config.iterations, UNIQUE_PAIR_COUNT
     );
+    eprintln!("Iterations: {}", config.iterations);
+    eprintln!("Rayon threads: {}", current_num_threads());
     let started = Instant::now();
     let cache = EquityCache::generate_with_progress(config.iterations, |completed, started_at| {
         report_progress(completed, UNIQUE_PAIR_COUNT as u64, started_at);
@@ -63,6 +66,9 @@ struct Config {
 }
 
 fn run_sample(iterations: u64, sample_count: usize) {
+    let threads = current_num_threads();
+    eprintln!("Rayon threads: {threads}");
+    eprintln!("Iterations: {iterations}");
     eprintln!(
         "Sample mode: generating {sample_count} unique pairs with {iterations} iterations each..."
     );
@@ -75,14 +81,15 @@ fn run_sample(iterations: u64, sample_count: usize) {
         },
     );
     let elapsed = started.elapsed();
-    let seconds_per_pair = elapsed.as_secs_f64() / sample_count as f64;
-    let full_eta_secs = seconds_per_pair * UNIQUE_PAIR_COUNT as f64;
+    let throughput = sample_count as f64 / elapsed.as_secs_f64();
+    let full_eta_secs = UNIQUE_PAIR_COUNT as f64 / throughput;
 
     eprintln!();
-    eprintln!("Sample pairs:      {sample_count}");
-    eprintln!("Elapsed:           {:.2}s", elapsed.as_secs_f64());
-    eprintln!("Seconds per pair:  {:.3}s", seconds_per_pair);
-    eprintln!("Unique pairs:      {UNIQUE_PAIR_COUNT}");
+    eprintln!("Sample pairs:       {sample_count}");
+    eprintln!("Rayon threads:      {threads}");
+    eprintln!("Elapsed:            {:.2}s", elapsed.as_secs_f64());
+    eprintln!("Throughput:         {:.2} pairs/s", throughput);
+    eprintln!("Unique pairs:       {UNIQUE_PAIR_COUNT}");
     eprintln!(
         "Estimated full ETA: {:.1} min ({:.0}s)",
         full_eta_secs / 60.0,
