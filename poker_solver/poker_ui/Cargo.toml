@@ -14,3 +14,4 @@ winres = "0.1"
 poker-core = { path = "../core" }
 eframe = "0.29"
 egui = "0.29"
+arboard = "3.6"

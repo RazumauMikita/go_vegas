@@ -8,4 +8,5 @@ name = "poker_core"
 
 [dependencies]
 rayon = "1.10"
+regex = "1.10"
 

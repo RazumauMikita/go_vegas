@@ -4,7 +4,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use egui::{Context, RichText, Ui};
-use poker_core::{icm_equity, solve, EquityCache, SolverInput, SolverOutput};
+use poker_core::{
+    icm_equity, parse_hand_history, solver_position_index, solve, EquityCache, SolverInput,
+    SolverOutput,
+};
 
 use crate::tabs::strategy_tree::{
     build_strategy_tree, draw_strategy_tree, node_at_path, NodePath, TreeNode,
@@ -32,6 +35,7 @@ pub struct SolverTab {
     prize_percents: Vec<String>,
     small_blind: String,
     big_blind: String,
+    ante: String,
     max_iterations: String,
     tolerance: String,
     equity_cache: EquityCache,
@@ -52,6 +56,7 @@ impl Default for SolverTab {
             prize_percents: vec!["50".to_string(), "30".to_string(), "20".to_string()],
             small_blind: "50".to_string(),
             big_blind: "100".to_string(),
+            ante: "0".to_string(),
             max_iterations: "100".to_string(),
             tolerance: "0.00001".to_string(),
             equity_cache: EquityCache::from_bytes(CACHE_BYTES).expect("embedded cache corrupted"),
@@ -138,6 +143,50 @@ impl SolverTab {
         }
     }
 
+    fn import_hand_from_clipboard(&mut self) {
+        self.error = None;
+
+        let text = match arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
+            Ok(text) if !text.trim().is_empty() => text,
+            Ok(_) => {
+                self.error = Some("буфер обмена пуст".to_string());
+                return;
+            }
+            Err(_) => {
+                self.error = Some("не удалось прочитать буфер обмена".to_string());
+                return;
+            }
+        };
+
+        match parse_hand_history(&text) {
+            Ok(hand) => {
+                let num_players = hand.players.len();
+                if num_players != 2 && num_players != 3 {
+                    self.error = Some(format!(
+                        "поддерживаются только 2 или 3 игрока (найдено {num_players})"
+                    ));
+                    return;
+                }
+
+                self.set_player_count(num_players);
+                self.small_blind = format_stack(hand.small_blind);
+                self.big_blind = format_stack(hand.big_blind);
+                self.ante = format_stack(hand.ante);
+
+                let mut stacks = vec!["0".to_string(); num_players];
+                for player in &hand.players {
+                    if let Some(index) = solver_position_index(player.position, num_players) {
+                        stacks[index] = format_stack(player.stack);
+                    }
+                }
+                self.stack_chips = stacks;
+            }
+            Err(err) => {
+                self.error = Some(err.to_string());
+            }
+        }
+    }
+
     fn draw_settings(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             ui.label("Игроков:");
@@ -220,6 +269,8 @@ impl SolverTab {
             ui.add_space(8.0);
             compact_param_field(ui, "BB:", &mut self.big_blind, 70.0);
             ui.add_space(8.0);
+            compact_param_field(ui, "Ante:", &mut self.ante, 70.0);
+            ui.add_space(8.0);
             compact_param_field(ui, "Iter:", &mut self.max_iterations, 70.0);
             ui.add_space(8.0);
             compact_param_field(ui, "Tol:", &mut self.tolerance, 80.0);
@@ -245,6 +296,9 @@ impl SolverTab {
 
     fn draw_action_row(&mut self, ui: &mut Ui, ctx: &Context) {
         ui.horizontal(|ui| {
+            if ui.button("Вставить раздачу").clicked() {
+                self.import_hand_from_clipboard();
+            }
             let can_run = !self.computing;
             if ui
                 .add_enabled(can_run, egui::Button::new("Рассчитать"))
@@ -429,13 +483,21 @@ impl SolverTab {
         if tolerance <= 0.0 {
             return Err("tolerance должен быть больше 0".to_string());
         }
+        let ante = self
+            .ante
+            .trim()
+            .parse::<f64>()
+            .map_err(|_| format!("некорректный ante: {}", self.ante))?;
+        if ante < 0.0 {
+            return Err("ante не может быть отрицательным".to_string());
+        }
 
         Ok(SolverInput {
             stacks,
             payouts,
             small_blind,
             big_blind,
-            ante: 0.0,
+            ante,
             button_index: 0,
             max_iterations,
             tolerance,
@@ -498,6 +560,14 @@ impl SolverTab {
 }
 
 const PARAM_FIELD_WIDTH: f32 = 70.0;
+
+fn format_stack(value: f64) -> String {
+    if (value - value.round()).abs() < 1e-9 {
+        format!("{}", value.round() as i64)
+    } else {
+        format!("{value}")
+    }
+}
 
 fn compact_param_field(ui: &mut Ui, label: &str, value: &mut String, width: f32) {
     ui.label(label);
