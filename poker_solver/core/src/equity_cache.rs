@@ -15,6 +15,27 @@ const COMBO_COUNT: usize = 169;
 const TABLE_LEN: usize = COMBO_COUNT * COMBO_COUNT;
 const CACHE_FILE_BYTES: usize = TABLE_LEN * 4;
 
+/// Ошибка загрузки или парсинга бинарного кэша эквити.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EquityCacheError {
+    InvalidSize { expected: usize, got: usize },
+}
+
+impl std::fmt::Display for EquityCacheError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidSize { expected, got } => {
+                write!(
+                    f,
+                    "invalid cache size: expected {expected} bytes, got {got}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for EquityCacheError {}
+
 /// Число уникальных пар (i, j) где i <= j.
 pub const UNIQUE_PAIR_COUNT: usize = COMBO_COUNT * (COMBO_COUNT + 1) / 2;
 
@@ -74,26 +95,17 @@ impl EquityCache {
         Ok(())
     }
 
+    /// Загрузить из байтового слайса (например, через include_bytes!).
+    ///
+    /// Формат тот же, что у файла: 169×169 f32 little-endian.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, EquityCacheError> {
+        parse_bytes(bytes)
+    }
+
     /// Загрузить таблицу из бинарного файла фиксированного размера.
     pub fn load(path: &Path) -> io::Result<Self> {
         let bytes = fs::read(path)?;
-        if bytes.len() != CACHE_FILE_BYTES {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "invalid cache size: expected {CACHE_FILE_BYTES} bytes, got {}",
-                    bytes.len()
-                ),
-            ));
-        }
-
-        let mut values = Vec::with_capacity(TABLE_LEN);
-        for chunk in bytes.as_chunks::<4>().0 {
-            let value = f32::from_le_bytes(*chunk);
-            values.push(value);
-        }
-
-        Ok(Self { values })
+        Self::from_bytes(&bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
     }
 
     /// Эквити руки `h1` против руки `h2` (индексы 0..169).
@@ -268,6 +280,23 @@ pub fn expand_combo(idx: u8) -> Vec<[Card; 2]> {
     }
 
     combos
+}
+
+fn parse_bytes(bytes: &[u8]) -> Result<EquityCache, EquityCacheError> {
+    if bytes.len() != CACHE_FILE_BYTES {
+        return Err(EquityCacheError::InvalidSize {
+            expected: CACHE_FILE_BYTES,
+            got: bytes.len(),
+        });
+    }
+
+    let mut values = Vec::with_capacity(TABLE_LEN);
+    for chunk in bytes.as_chunks::<4>().0 {
+        let value = f32::from_le_bytes(*chunk);
+        values.push(value);
+    }
+
+    Ok(EquityCache { values })
 }
 
 fn table_index(h1: u8, h2: u8) -> usize {
@@ -655,6 +684,27 @@ mod tests {
         let cache = EquityCache::generate_subset(&[(hero_index, villain_index)], 10_000);
         let equity = cache.equity_vs_range(hero, &[villain_index]);
         assert!((equity - 0.5).abs() < 0.05, "expected ~0.5, got {equity}");
+    }
+
+    #[test]
+    fn from_bytes_roundtrip() {
+        let cache = EquityCache::generate_subset(&[(0, 0), (0, 1)], 100);
+        let path = std::env::temp_dir().join("poker_equity_cache_from_bytes.bin");
+        cache.save(&path).expect("save cache");
+        let bytes = fs::read(&path).expect("read cache");
+        let loaded = EquityCache::from_bytes(&bytes).expect("from_bytes");
+        assert_eq!(loaded.equity(0, 0), cache.equity(0, 0));
+        assert_eq!(loaded.equity(0, 1), cache.equity(0, 1));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn from_bytes_wrong_size_fails() {
+        let result = EquityCache::from_bytes(&[0_u8; 16]);
+        assert!(matches!(
+            result,
+            Err(EquityCacheError::InvalidSize { .. })
+        ));
     }
 
     #[test]

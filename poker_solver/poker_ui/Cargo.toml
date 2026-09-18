@@ -7,8 +7,10 @@ edition = "2021"
 name = "poker_ui"
 path = "src/main.rs"
 
+[build-dependencies]
+winres = "0.1"
+
 [dependencies]
 poker-core = { path = "../core" }
 eframe = "0.29"
 egui = "0.29"
-rfd = "0.15"

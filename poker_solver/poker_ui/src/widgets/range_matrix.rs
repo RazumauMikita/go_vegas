@@ -1,6 +1,6 @@
 use poker_core::{combo_index, combo_label, index_to_ranks, Card};
 
-const CELL_SIZE: f32 = 40.0;
+const CELL_SIZE: f32 = 32.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MatrixMode {

@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -25,18 +24,18 @@ enum SolverWorkerMessage {
     Done(SolverResult),
 }
 
+const CACHE_BYTES: &[u8] = include_bytes!("../../assets/equity_cache.bin");
+
 pub struct SolverTab {
     player_count: usize,
     stack_chips: Vec<String>,
     prize_percents: Vec<String>,
     small_blind: String,
     big_blind: String,
-    cache_path: String,
     max_iterations: String,
+    equity_cache: EquityCache,
     matrix_modes: HashMap<String, MatrixMode>,
     error: Option<String>,
-    cached_equity: Option<EquityCache>,
-    cached_equity_path: Option<PathBuf>,
     worker_rx: Option<mpsc::Receiver<SolverWorkerMessage>>,
     computing: bool,
     result: Option<SolverResult>,
@@ -52,12 +51,10 @@ impl Default for SolverTab {
             prize_percents: vec!["50".to_string(), "30".to_string(), "20".to_string()],
             small_blind: "50".to_string(),
             big_blind: "100".to_string(),
-            cache_path: "equity_cache.bin".to_string(),
             max_iterations: "100".to_string(),
+            equity_cache: EquityCache::from_bytes(CACHE_BYTES).expect("embedded cache corrupted"),
             matrix_modes: HashMap::new(),
             error: None,
-            cached_equity: None,
-            cached_equity_path: None,
             worker_rx: None,
             computing: false,
             result: None,
@@ -72,13 +69,14 @@ impl SolverTab {
         egui::TopBottomPanel::top("solver_input_panel")
             .resizable(false)
             .show(ctx, |ui| {
-                ui.add_space(4.0);
+                ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
                 egui::CollapsingHeader::new("Настройки")
-                    .default_open(true)
+                    .default_open(false)
                     .show(ui, |ui| {
-                        self.draw_input_form(ui, ctx);
+                        ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
+                        self.draw_settings(ui);
                     });
-                ui.add_space(4.0);
+                self.draw_action_row(ui, ctx);
             });
 
         if self.result.is_some() && !self.tree.is_empty() {
@@ -138,7 +136,7 @@ impl SolverTab {
         }
     }
 
-    fn draw_input_form(&mut self, ui: &mut Ui, ctx: &Context) {
+    fn draw_settings(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             ui.label("Игроков:");
             if ui.selectable_label(self.player_count == 2, "2").clicked() {
@@ -151,58 +149,93 @@ impl SolverTab {
 
         let bb = self.big_blind.trim().parse::<f64>().unwrap_or(100.0).max(1e-9);
 
-        egui::Grid::new("stack_input_table")
-            .num_columns(3)
-            .striped(true)
-            .show(ui, |ui| {
-                ui.label("Position");
-                ui.label("Stack (chips)");
-                ui.label("Stack (BB)");
-                ui.end_row();
-
-                for index in 0..self.player_count {
-                    ui.label(position_label(self.player_count, index));
-                    ui.text_edit_singleline(&mut self.stack_chips[index]);
-                    let stack_bb = self
-                        .stack_chips
-                        .get(index)
-                        .and_then(|s| s.trim().parse::<f64>().ok())
-                        .map(|stack| stack / bb)
-                        .unwrap_or(0.0);
-                    ui.label(format!("{stack_bb:.2}"));
-                    ui.end_row();
-                }
-            });
-
-        ui.add_space(4.0);
-
-        egui::Grid::new("prize_input_table")
-            .num_columns(2)
-            .striped(true)
-            .show(ui, |ui| {
-                ui.label("Place");
-                ui.label("Prize (%)");
-                ui.end_row();
-
-                for index in 0..self.prize_percents.len() {
-                    ui.label(format!("{}", index + 1));
-                    ui.text_edit_singleline(&mut self.prize_percents[index]);
-                    ui.end_row();
-                }
-            });
-
         ui.horizontal(|ui| {
-            if ui.button("+").clicked() && self.prize_percents.len() < self.player_count {
-                self.prize_percents.push("0".to_string());
-            }
-            if ui.button("−").clicked() && self.prize_percents.len() > 1 {
-                self.prize_percents.pop();
-            }
+            ui.vertical(|ui| {
+                ui.label("Стеки");
+                egui::Grid::new("stack_input_table")
+                    .num_columns(3)
+                    .striped(true)
+                    .spacing(egui::vec2(6.0, 4.0))
+                    .show(ui, |ui| {
+                        ui.label("Position");
+                        ui.label("Stack");
+                        ui.label("Stack BB");
+                        ui.end_row();
+
+                        for index in 0..self.player_count {
+                            ui.label(position_label(self.player_count, index));
+                            ui.text_edit_singleline(&mut self.stack_chips[index]);
+                            let stack_bb = self
+                                .stack_chips
+                                .get(index)
+                                .and_then(|s| s.trim().parse::<f64>().ok())
+                                .map(|stack| stack / bb)
+                                .unwrap_or(0.0);
+                            ui.label(format!("{stack_bb:.2}"));
+                            ui.end_row();
+                        }
+                    });
+            });
+
+            ui.add_space(16.0);
+
+            ui.vertical(|ui| {
+                ui.label("Призы");
+                egui::Grid::new("prize_input_table")
+                    .num_columns(2)
+                    .striped(true)
+                    .spacing(egui::vec2(6.0, 4.0))
+                    .show(ui, |ui| {
+                        ui.label("Place");
+                        ui.label("Prize %");
+                        ui.end_row();
+
+                        for index in 0..self.prize_percents.len() {
+                            ui.label(format!("{}", index + 1));
+                            ui.text_edit_singleline(&mut self.prize_percents[index]);
+                            ui.end_row();
+                        }
+                    });
+
+                ui.horizontal(|ui| {
+                    if ui.button("+").clicked() && self.prize_percents.len() < self.player_count
+                    {
+                        self.prize_percents.push("0".to_string());
+                    }
+                    if ui.button("−").clicked() && self.prize_percents.len() > 1 {
+                        self.prize_percents.pop();
+                    }
+                });
+            });
         });
 
-        ui.add_space(6.0);
-        draw_solver_params(ui, self);
+        ui.horizontal(|ui| {
+            compact_param_field(ui, "SB:", &mut self.small_blind, 70.0);
+            ui.add_space(8.0);
+            compact_param_field(ui, "BB:", &mut self.big_blind, 70.0);
+            ui.add_space(8.0);
+            compact_param_field(ui, "Iter:", &mut self.max_iterations, 70.0);
+        });
 
+        if let Some(pool_size) = self.parse_prize_sum() {
+            if pool_size > 1.0 + 1e-6 {
+                ui.colored_label(
+                    egui::Color32::RED,
+                    format!(
+                        "Сумма payouts не может превышать 1.0 (получено {:.2})",
+                        pool_size
+                    ),
+                );
+            } else if pool_size < 1.0 - 1e-6 {
+                ui.label(format!(
+                    "Pool size: {pool_size:.2} ({:.1}% уже разыграно — например, 3-м местом)",
+                    (1.0 - pool_size) * 100.0
+                ));
+            }
+        }
+    }
+
+    fn draw_action_row(&mut self, ui: &mut Ui, ctx: &Context) {
         ui.horizontal(|ui| {
             let can_run = !self.computing;
             if ui
@@ -253,11 +286,7 @@ impl SolverTab {
                         .matrix_modes
                         .entry(label.clone())
                         .or_insert(MatrixMode::Frequency);
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            range_matrix_ui(ui, &range, ev_range.as_ref(), mode, &label);
-                        });
+                    range_matrix_ui(ui, &range, ev_range.as_ref(), mode, &label);
                 }
 
                 ui.add_space(12.0);
@@ -306,13 +335,7 @@ impl SolverTab {
             }
         };
 
-        let cache = match self.load_cache() {
-            Ok(cache) => cache,
-            Err(message) => {
-                self.error = Some(message);
-                return;
-            }
-        };
+        let cache = self.equity_cache.clone();
 
         let payouts = normalize_payouts(&input.payouts);
         let eq_pre = icm_equity(&input.stacks, &payouts);
@@ -368,10 +391,9 @@ impl SolverTab {
         }
 
         let prize_sum: f64 = payouts.iter().sum();
-        if (prize_sum - 1.0).abs() > 1e-6 {
+        if prize_sum > 1.0 + 1e-6 {
             return Err(format!(
-                "призы должны суммироваться в 100%, получено {:.1}%",
-                prize_sum * 100.0
+                "Сумма payouts не может превышать 1.0 (получено {prize_sum:.2})"
             ));
         }
 
@@ -407,43 +429,34 @@ impl SolverTab {
         })
     }
 
-    fn load_cache(&mut self) -> Result<EquityCache, String> {
-        let path = PathBuf::from(self.cache_path.trim());
-        if self.cached_equity_path.as_ref() == Some(&path) {
-            if let Some(cache) = &self.cached_equity {
-                return Ok(cache.clone());
-            }
+    fn parse_prize_sum(&self) -> Option<f64> {
+        let mut sum = 0.0;
+        for text in &self.prize_percents {
+            let value = text.trim().parse::<f64>().ok()? / 100.0;
+            sum += value;
         }
-
-        if !path.exists() {
-            return Err(format!(
-                "файл кэша не найден: {}. Укажите путь к equity_cache.bin",
-                path.display()
-            ));
-        }
-
-        let cache = EquityCache::load(&path).map_err(|error| {
-            format!("не удалось загрузить кэш {}: {error}", path.display())
-        })?;
-
-        self.cached_equity = Some(cache.clone());
-        self.cached_equity_path = Some(path);
-        Ok(cache)
+        Some(sum)
     }
 
     fn show_outline_table(&self, ui: &mut Ui, result: &SolverResult) {
         let bb = result.input.big_blind.max(1e-9);
         let players = result.input.stacks.len();
         let range_shares = outline_range_shares(&result.output, players);
+        let pool_size: f64 = result.input.payouts.iter().sum();
+        let show_eq_real = pool_size < 1.0 - 1e-6;
+        let columns = if show_eq_real { 7 } else { 6 };
 
         egui::Grid::new("solver_outline_table")
-            .num_columns(6)
+            .num_columns(columns)
             .striped(true)
             .show(ui, |ui| {
                 ui.label("Pos");
                 ui.label("Stack");
                 right_label(ui, "EQPre%");
                 right_label(ui, "EQPost%");
+                if show_eq_real {
+                    right_label(ui, "EQReal%");
+                }
                 right_label(ui, "EQDiff%");
                 right_label(ui, "Range%");
                 ui.end_row();
@@ -454,9 +467,13 @@ impl SolverTab {
                     right_label(ui, &format!("{stack_bb:.2}"));
                     let eq_pre = result.eq_pre[index] * 100.0;
                     let eq_post = result.output.equities[index] * 100.0;
+                    let eq_real = eq_post * pool_size;
                     let eq_diff = eq_post - eq_pre;
                     right_label(ui, &format!("{eq_pre:.2}"));
                     right_label(ui, &format!("{eq_post:.2}"));
+                    if show_eq_real {
+                        right_label(ui, &format!("{eq_real:.2}"));
+                    }
                     right_label(ui, &format!("{:+.2}", eq_diff));
                     right_label(ui, &format!("{:.1}", range_shares[index] * 100.0));
                     ui.end_row();
@@ -465,42 +482,13 @@ impl SolverTab {
     }
 }
 
-const PARAM_LABEL_WIDTH: f32 = 80.0;
-const PARAM_FIELD_WIDTH: f32 = 200.0;
-const PARAM_ROW_SPACING: f32 = 6.0;
+const PARAM_FIELD_WIDTH: f32 = 70.0;
 
-fn draw_solver_params(ui: &mut Ui, tab: &mut SolverTab) {
-    param_text_row(ui, "SB:", &mut tab.small_blind);
-    param_text_row(ui, "BB:", &mut tab.big_blind);
-
-    ui.horizontal(|ui| {
-        ui.add_sized(
-            [PARAM_LABEL_WIDTH, ui.spacing().interact_size.y],
-            egui::Label::new("Cache:"),
-        );
-        ui.add(
-            egui::TextEdit::singleline(&mut tab.cache_path).desired_width(PARAM_FIELD_WIDTH),
-        );
-        if ui.button("Обзор...").clicked() {
-            if let Some(path) = pick_cache_file() {
-                tab.cache_path = path;
-            }
-        }
-    });
-    ui.add_space(PARAM_ROW_SPACING);
-
-    param_text_row(ui, "Iter:", &mut tab.max_iterations);
-}
-
-fn param_text_row(ui: &mut Ui, label: &str, value: &mut String) {
-    ui.horizontal(|ui| {
-        ui.add_sized(
-            [PARAM_LABEL_WIDTH, ui.spacing().interact_size.y],
-            egui::Label::new(label),
-        );
-        ui.add(egui::TextEdit::singleline(value).desired_width(PARAM_FIELD_WIDTH));
-    });
-    ui.add_space(PARAM_ROW_SPACING);
+fn compact_param_field(ui: &mut Ui, label: &str, value: &mut String, width: f32) {
+    ui.label(label);
+    ui.add(
+        egui::TextEdit::singleline(value).desired_width(width.max(PARAM_FIELD_WIDTH)),
+    );
 }
 
 fn right_label(ui: &mut Ui, text: &str) {
@@ -553,13 +541,6 @@ fn outline_range_shares(output: &SolverOutput, players: usize) -> Vec<f64> {
     vec![0.0; players]
 }
 
-fn pick_cache_file() -> Option<String> {
-    rfd::FileDialog::new()
-        .add_filter("Equity cache", &["bin"])
-        .pick_file()
-        .map(|path| path.display().to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -576,14 +557,28 @@ mod tests {
     }
 
     #[test]
+    fn parse_solver_input_allows_partial_payouts() {
+        let mut tab = SolverTab::default();
+        tab.player_count = 2;
+        tab.stack_chips = vec!["1000".to_string(), "1000".to_string()];
+        tab.prize_percents = vec!["50".to_string(), "30".to_string()];
+        let input = tab.parse_input().expect("partial payouts should parse");
+        assert_eq!(input.payouts, vec![0.5, 0.3]);
+    }
+
+    #[test]
+    fn parse_solver_input_rejects_payouts_over_one() {
+        let mut tab = SolverTab::default();
+        tab.prize_percents = vec!["60".to_string(), "50".to_string()];
+        let error = tab.parse_input().expect_err("overfull payouts should fail");
+        assert!(error.contains("не может превышать 1.0"));
+    }
+
+    #[test]
     fn outline_range_share_for_btn() {
         let tab = SolverTab::default();
         let input = tab.parse_input().expect("parse");
-        let path = PathBuf::from("equity_cache.bin");
-        if !path.exists() {
-            return;
-        }
-        let cache = EquityCache::load(&path).expect("cache");
+        let cache = EquityCache::from_bytes(CACHE_BYTES).expect("embedded cache");
         let output = solve(&input, &cache);
         let shares = outline_range_shares(&output, 3);
         assert!(
