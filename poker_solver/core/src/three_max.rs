@@ -5,7 +5,7 @@ use crate::equity_3way::equity_3way_places;
 use crate::equity_cache::{expand_combo, EquityCache};
 use crate::solver::{
     best_response, build_unblocked, empty_output, tournament_equity, transfer, SolverInput,
-    SolverOutput, ThreeMaxRanges, HAND_TYPES,
+    SolverOutput, ThreeMaxHandEvs, ThreeMaxRanges, HAND_EV_SCALE, HAND_TYPES,
 };
 
 const THREE_WAY_SAMPLES: u32 = 64;
@@ -173,6 +173,22 @@ pub(crate) fn solve_3max(input: &SolverInput, cache: &EquityCache) -> SolverOutp
         cache,
     );
 
+    let three_max_hand_evs = compute_three_max_hand_evs(
+        &btn_push,
+        &sb_call_vs_btn,
+        &bb_call_vs_btn,
+        &bb_call_vs_both,
+        &sb_push,
+        &bb_call_vs_sb,
+        &ctx,
+        cache,
+    );
+
+    let mut hand_evs = vec![[0.0; HAND_TYPES]; 3];
+    hand_evs[ctx.btn] = three_max_hand_evs.btn_push;
+    hand_evs[ctx.sb] = three_max_hand_evs.sb_push;
+    hand_evs[ctx.bb] = three_max_hand_evs.bb_call_vs_btn;
+
     SolverOutput {
         push_ranges,
         call_ranges,
@@ -187,6 +203,68 @@ pub(crate) fn solve_3max(input: &SolverInput, cache: &EquityCache) -> SolverOutp
             sb_push,
             bb_call_vs_sb,
         }),
+        hand_evs,
+        three_max_hand_evs: Some(three_max_hand_evs),
+    }
+}
+
+fn compute_three_max_hand_evs(
+    btn_push: &[f64; HAND_TYPES],
+    sb_call_vs_btn: &[f64; HAND_TYPES],
+    bb_call_vs_btn: &[f64; HAND_TYPES],
+    bb_call_vs_both: &[f64; HAND_TYPES],
+    sb_push: &[f64; HAND_TYPES],
+    bb_call_vs_sb: &[f64; HAND_TYPES],
+    ctx: &ThreeMaxContext,
+    cache: &EquityCache,
+) -> ThreeMaxHandEvs {
+    let mut btn_push_evs = [0.0; HAND_TYPES];
+    let mut sb_call_evs = [0.0; HAND_TYPES];
+    let mut bb_call_btn_evs = [0.0; HAND_TYPES];
+    let mut bb_call_both_evs = [0.0; HAND_TYPES];
+    let mut sb_push_evs = [0.0; HAND_TYPES];
+    let mut bb_call_sb_evs = [0.0; HAND_TYPES];
+
+    for hand in 0..HAND_TYPES {
+        let ev_push = ev_btn_push(
+            hand,
+            sb_call_vs_btn,
+            bb_call_vs_btn,
+            bb_call_vs_both,
+            ctx,
+            cache,
+        );
+        let ev_fold = ev_btn_fold(hand, sb_push, bb_call_vs_sb, ctx, cache);
+        btn_push_evs[hand] = (ev_push - ev_fold) * HAND_EV_SCALE;
+
+        let ev_call = ev_sb_call_vs_btn(hand, btn_push, bb_call_vs_both, ctx, cache);
+        let ev_sb_fold = ev_sb_fold_vs_btn(hand, btn_push, bb_call_vs_btn, ctx, cache);
+        sb_call_evs[hand] = (ev_call - ev_sb_fold) * HAND_EV_SCALE;
+
+        let ev_bb_call = ev_bb_call_vs_btn(hand, btn_push, sb_call_vs_btn, ctx, cache);
+        let ev_bb_fold = ctx.icm_btn_takes_blinds[ctx.bb];
+        bb_call_btn_evs[hand] = (ev_bb_call - ev_bb_fold) * HAND_EV_SCALE;
+
+        let ev_bb_call_both = ev_bb_call_vs_both(hand, btn_push, sb_call_vs_btn, ctx, cache);
+        let ev_bb_fold_both = ev_bb_fold_vs_both(hand, btn_push, sb_call_vs_btn, ctx, cache);
+        bb_call_both_evs[hand] = (ev_bb_call_both - ev_bb_fold_both) * HAND_EV_SCALE;
+
+        let ev_sb_push = ev_sb_push_after_btn_fold(hand, bb_call_vs_sb, ctx, cache);
+        let ev_sb_push_fold = ctx.icm_bb_walks[ctx.sb];
+        sb_push_evs[hand] = (ev_sb_push - ev_sb_push_fold) * HAND_EV_SCALE;
+
+        let ev_bb_call_sb = ev_bb_call_vs_sb(hand, sb_push, ctx, cache);
+        let ev_bb_call_sb_fold = ctx.icm_sb_walks[ctx.bb];
+        bb_call_sb_evs[hand] = (ev_bb_call_sb - ev_bb_call_sb_fold) * HAND_EV_SCALE;
+    }
+
+    ThreeMaxHandEvs {
+        btn_push: btn_push_evs,
+        sb_call_vs_btn: sb_call_evs,
+        bb_call_vs_btn: bb_call_btn_evs,
+        bb_call_vs_btn_and_sb: bb_call_both_evs,
+        sb_push: sb_push_evs,
+        bb_call_vs_sb: bb_call_sb_evs,
     }
 }
 

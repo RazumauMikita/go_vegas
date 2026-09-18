@@ -34,22 +34,37 @@ impl eframe::App for PokerApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         self.solver.poll(ctx);
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::TopBottomPanel::top("app_header").show(ctx, |ui| {
             ui.heading("Poker Solver");
             ui.add_space(4.0);
             self.draw_tabs(ui);
             ui.separator();
-            ui.add_space(8.0);
-
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show(ui, |ui| match self.active_tab {
-                    Tab::Solver => self.solver.ui(ui, ctx),
-                    Tab::Equity => self.equity.ui(ui),
-                    Tab::Icm => self.icm.ui(ui),
-                    Tab::Eval => self.eval.ui(ui),
-                });
         });
+
+        match self.active_tab {
+            Tab::Solver => self.solver.ui(ctx),
+            Tab::Equity => {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| self.equity.ui(ui));
+                });
+            }
+            Tab::Icm => {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| self.icm.ui(ui));
+                });
+            }
+            Tab::Eval => {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| self.eval.ui(ui));
+                });
+            }
+        }
     }
 }
 

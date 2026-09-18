@@ -44,6 +44,19 @@ pub struct ThreeMaxRanges {
     pub bb_call_vs_sb: [f64; HAND_TYPES],
 }
 
+/// EV-дифференциал (action − fold) × 100 для каждой руки в 3-max.
+#[derive(Debug, Clone)]
+pub struct ThreeMaxHandEvs {
+    pub btn_push: [f64; HAND_TYPES],
+    pub sb_call_vs_btn: [f64; HAND_TYPES],
+    pub bb_call_vs_btn: [f64; HAND_TYPES],
+    pub bb_call_vs_btn_and_sb: [f64; HAND_TYPES],
+    pub sb_push: [f64; HAND_TYPES],
+    pub bb_call_vs_sb: [f64; HAND_TYPES],
+}
+
+pub(crate) const HAND_EV_SCALE: f64 = 100.0;
+
 /// Выходные данные солвера.
 #[derive(Debug, Clone)]
 pub struct SolverOutput {
@@ -59,6 +72,10 @@ pub struct SolverOutput {
     pub converged: bool,
     /// Диапазоны 3-max (если солвер запускался на трёх игроках).
     pub three_max: Option<ThreeMaxRanges>,
+    /// EV-дифференциал основного действия каждой позиции (push/call − fold) × 100.
+    pub hand_evs: Vec<[f64; HAND_TYPES]>,
+    /// EV-дифференциалы для всех 3-max диапазонов.
+    pub three_max_hand_evs: Option<ThreeMaxHandEvs>,
 }
 
 /// Найти равновесие Нэша для push/fold.
@@ -146,6 +163,14 @@ fn solve_hu(input: &SolverInput, cache: &EquityCache) -> SolverOutput {
     equities[ctx.sb] = sb_equity;
     equities[ctx.bb] = 1.0 - sb_equity;
 
+    let mut hand_evs = vec![[0.0; HAND_TYPES]; 2];
+    for hand_idx in 0..HAND_TYPES {
+        let ev_push = ev_push_sb(hand_idx, &call_range, &ctx, cache);
+        hand_evs[ctx.sb][hand_idx] = (ev_push - ctx.ev_sb_fold) * HAND_EV_SCALE;
+        let ev_call = ev_call_bb(hand_idx, &push_range, &ctx, cache);
+        hand_evs[ctx.bb][hand_idx] = (ev_call - ctx.ev_bb_fold) * HAND_EV_SCALE;
+    }
+
     SolverOutput {
         push_ranges,
         call_ranges,
@@ -153,6 +178,8 @@ fn solve_hu(input: &SolverInput, cache: &EquityCache) -> SolverOutput {
         iterations_used,
         converged,
         three_max: None,
+        hand_evs,
+        three_max_hand_evs: None,
     }
 }
 
@@ -164,6 +191,8 @@ pub(crate) fn empty_output(players: usize) -> SolverOutput {
         iterations_used: 0,
         converged: false,
         three_max: None,
+        hand_evs: vec![[0.0; HAND_TYPES]; players],
+        three_max_hand_evs: None,
     }
 }
 

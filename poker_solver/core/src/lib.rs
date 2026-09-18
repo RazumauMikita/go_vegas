@@ -16,4 +16,4 @@ pub use equity_cache::{
 };
 pub use hand_evaluator::{evaluate_hand, HandCategory, HandRank};
 pub use icm::{icm_equity, icm_equity_for_player};
-pub use solver::{solve, SolverInput, SolverOutput, ThreeMaxRanges};
+pub use solver::{solve, SolverInput, SolverOutput, ThreeMaxHandEvs, ThreeMaxRanges};
