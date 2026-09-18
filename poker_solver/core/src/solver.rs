@@ -80,6 +80,17 @@ pub struct SolverOutput {
     pub three_max_hand_evs: Option<ThreeMaxHandEvs>,
 }
 
+/// Диагностика EV колла BB (без FP, фиксированные диапазоны по combo-share).
+pub fn debug_bb_report(
+    input: &SolverInput,
+    cache: &EquityCache,
+    hand_label: &str,
+    btn_combo_share: f64,
+    sb_combo_share: f64,
+) -> Result<String, String> {
+    three_max::debug_bb_report(input, cache, hand_label, btn_combo_share, sb_combo_share)
+}
+
 /// Найти равновесие Нэша для push/fold.
 ///
 /// HU (2 игрока) или 3-max (BTN/SB/BB).
@@ -715,7 +726,7 @@ mod tests {
 
         let ranges = three_max_ranges();
         let expected = [
-            ("BTN push", range_combo_share(&ranges.btn_push), 26.0),
+            ("BTN push", range_combo_share(&ranges.btn_push), 25.5),
             (
                 "SB call vs BTN",
                 range_combo_share(&ranges.sb_call_vs_btn),
@@ -724,14 +735,14 @@ mod tests {
             (
                 "BB call vs BTN",
                 range_combo_share(&ranges.bb_call_vs_btn),
-                8.8,
+                9.1,
             ),
             (
                 "BB call vs both",
                 range_combo_share(&ranges.bb_call_vs_btn_and_sb),
-                1.4,
+                1.8,
             ),
-            ("SB push", range_combo_share(&ranges.sb_push), 59.4),
+            ("SB push", range_combo_share(&ranges.sb_push), 59.9),
             (
                 "BB call vs SB",
                 range_combo_share(&ranges.bb_call_vs_sb),

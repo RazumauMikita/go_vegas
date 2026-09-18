@@ -13,7 +13,7 @@ use crate::solver::{
 use crate::three_way_cache::ThreeWayCache;
 
 const THREE_WAY_SAMPLES: u32 = 64;
-const THREE_WAY_BOARDS: u64 = 12;
+const THREE_WAY_BOARDS: u64 = 100;
 const THREE_WAY_CACHE_FILE: &str = "equity_3way_cache.bin";
 
 pub(crate) fn solve_3max(input: &SolverInput, cache: &EquityCache) -> SolverOutput {
@@ -349,6 +349,7 @@ struct ThreeMaxContext {
     icm_hu_sb_bb_btn_fold_sb_win: Vec<f64>,
     icm_hu_sb_bb_btn_fold_bb_win: Vec<f64>,
     all_in_stacks: [f64; 3],
+    three_way_uncalled: [f64; 3],
     stacks_equal: bool,
     three_way: ThreeWayCache,
     seat_caches: Vec<ThreeWayCache>,
@@ -407,9 +408,9 @@ impl ThreeMaxContext {
         let icm_hu_sb_bb_btn_fold_bb_win =
             tournament_equity(&hu_with_dead(stacks, btn, btn_dead, sb, bb, bb), &payouts);
 
-        let all_in_stacks = [stacks[btn], stacks[sb], stacks[bb]];
+        let (all_in_stacks, three_way_uncalled) = three_way_effective_stacks(stacks, btn, sb, bb);
         let stacks_equal =
-            all_in_stacks[0] == all_in_stacks[1] && all_in_stacks[1] == all_in_stacks[2];
+            stacks[btn] == stacks[sb] && stacks[sb] == stacks[bb];
         let seat_caches = if stacks_equal {
             Vec::new()
         } else {
@@ -437,6 +438,7 @@ impl ThreeMaxContext {
             icm_hu_sb_bb_btn_fold_sb_win,
             icm_hu_sb_bb_btn_fold_bb_win,
             all_in_stacks,
+            three_way_uncalled,
             stacks_equal,
             three_way,
             seat_caches,
@@ -458,6 +460,32 @@ impl ThreeMaxContext {
             self.seat_caches.iter().map(ThreeWayCache::miss_count).sum()
         }
     }
+}
+
+/// Эффективные олл-ин стеки (btn, sb, bb) и uncalled-возвраты для 3-way showdown.
+fn three_way_effective_stacks(
+    stacks: &[f64],
+    btn: usize,
+    sb: usize,
+    bb: usize,
+) -> ([f64; 3], [f64; 3]) {
+    let seat = [stacks[btn], stacks[sb], stacks[bb]];
+    let max_other = [
+        seat[1].max(seat[2]),
+        seat[0].max(seat[2]),
+        seat[0].max(seat[1]),
+    ];
+    let contested = [
+        seat[0].min(max_other[0]),
+        seat[1].min(max_other[1]),
+        seat[2].min(max_other[2]),
+    ];
+    let uncalled = [
+        seat[0] - contested[0],
+        seat[1] - contested[1],
+        seat[2] - contested[2],
+    ];
+    (contested, uncalled)
 }
 
 fn collect_dead(stacks: &[f64], from: &[(usize, f64)], winner: usize) -> Vec<f64> {
@@ -975,6 +1003,7 @@ fn three_way_ev(
                         hand_a,
                         hand_b,
                         ctx.all_in_stacks,
+                        ctx.three_way_uncalled,
                         &ctx.payouts,
                         THREE_WAY_BOARDS,
                     )[0]
@@ -998,6 +1027,7 @@ fn three_way_ev(
                         sb_h,
                         bb_h,
                         ctx.all_in_stacks,
+                        ctx.three_way_uncalled,
                         &ctx.payouts,
                         THREE_WAY_BOARDS,
                     )[hero_idx]
@@ -1098,6 +1128,565 @@ impl Rng {
     }
 }
 
+/// Диагностика EV колла BB (без FP). Фиксированные диапазоны по combo-share.
+pub(crate) fn debug_bb_report(
+    input: &SolverInput,
+    cache: &EquityCache,
+    hand_label: &str,
+    btn_combo_share: f64,
+    sb_combo_share: f64,
+) -> Result<String, String> {
+    use crate::equity_3way::icm_showdown_equity;
+    use crate::equity_cache::combo_label;
+    use std::fmt::Write;
+
+    let hand_idx = (0..HAND_TYPES)
+        .find(|&idx| combo_label(idx as u8).eq_ignore_ascii_case(hand_label))
+        .ok_or_else(|| format!("unknown hand label: {hand_label}"))?;
+
+    let ctx = ThreeMaxContext::new(input, ThreeWayCache::new())
+        .ok_or_else(|| "failed to build ThreeMaxContext".to_string())?;
+
+    let btn_push = top_combo_range(cache, btn_combo_share);
+    let sb_call = top_combo_range(cache, sb_combo_share);
+
+    let mut out = String::new();
+    writeln!(
+        out,
+        "BB debug: hand={} (idx={})  stacks={:?}",
+        hand_label,
+        hand_idx,
+        input.stacks
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "Fixed ranges: BTN push combo-share {:.1}%  SB call combo-share {:.1}%",
+        combo_range_share(&btn_push) * 100.0,
+        combo_range_share(&sb_call) * 100.0
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "3-way contested={:?}  uncalled={:?}",
+        ctx.all_in_stacks,
+        ctx.three_way_uncalled
+    )
+    .unwrap();
+    writeln!(out).unwrap();
+
+    let icm_win_hu = ctx.icm_hu_btn_bb_sb_fold_bb_win[ctx.bb];
+    let icm_lose_hu = ctx.icm_hu_btn_bb_sb_fold_btn_win[ctx.bb];
+    let ev_call_hu = ev_bb_call_vs_btn(hand_idx, &btn_push, &sb_call, &ctx, cache);
+    let ev_fold_hu = ctx.icm_btn_takes_blinds[ctx.bb];
+    let p_bb_win_hu = hu_equity_vs_range(hand_idx, &ctx.unblocked[hand_idx][0], &btn_push, cache);
+    let ev_call_hu_formula = p_bb_win_hu * icm_win_hu + (1.0 - p_bb_win_hu) * icm_lose_hu;
+
+    writeln!(out, "=== Card removal (avg over BB combos) ===").unwrap();
+    writeln!(out, "{}", debug_card_removal(hand_idx, &btn_push, &sb_call, &ctx)).unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(out, "=== HU (SB fold) ===").unwrap();
+    writeln!(out, "EV_call = {:.2}%", ev_call_hu * 100.0).unwrap();
+    writeln!(
+        out,
+        "P(BB wins vs BTN push): {:.2}%",
+        p_bb_win_hu * 100.0
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "ICM: win={:.2}%  lose={:.2}%",
+        icm_win_hu * 100.0,
+        icm_lose_hu * 100.0
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "EV_call = {:.2}% × {:.2}% + {:.2}% × {:.2}% = {:.2}%",
+        p_bb_win_hu * 100.0,
+        icm_win_hu * 100.0,
+        (1.0 - p_bb_win_hu) * 100.0,
+        icm_lose_hu * 100.0,
+        ev_call_hu_formula * 100.0
+    )
+    .unwrap();
+    writeln!(out, "EV_fold = {:.2}%", ev_fold_hu * 100.0).unwrap();
+    writeln!(out).unwrap();
+
+    let ev_call_3w = ev_bb_call_vs_both(hand_idx, &btn_push, &sb_call, &ctx, cache);
+    let ev_fold_3w = ev_bb_fold_vs_both(hand_idx, &btn_push, &sb_call, &ctx, cache);
+
+    let breakdown = debug_bb_3way_scenarios(
+        hand_idx,
+        &btn_push,
+        &sb_call,
+        &ctx,
+        THREE_WAY_BOARDS,
+    );
+
+    writeln!(out, "=== 3-way (SB call) ===").unwrap();
+    writeln!(out, "{}", breakdown.report).unwrap();
+    writeln!(
+        out,
+        "EV_call (solver) = {:.2}%",
+        ev_call_3w * 100.0
+    )
+    .unwrap();
+    writeln!(out, "EV_fold = {:.2}%", ev_fold_3w * 100.0).unwrap();
+    writeln!(
+        out,
+        "Fold spectator ICM: btn_win={:.2}%  sb_win={:.2}%",
+        ctx.icm_hu_btn_sb_bb_fold_btn_win[ctx.bb] * 100.0,
+        ctx.icm_hu_btn_sb_bb_fold_sb_win[ctx.bb] * 100.0
+    )
+    .unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "Comparison: EV_call_HU {:.2}% vs EV_call_3way {:.2}% (Δ {:.2}%)",
+        ev_call_hu * 100.0,
+        ev_call_3w * 100.0,
+        (ev_call_3w - ev_call_hu) * 100.0
+    )
+    .unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(out, "=== ICM terminals (fixed stacks) ===").unwrap();
+    let contested = ctx.all_in_stacks;
+    let uncalled = ctx.three_way_uncalled;
+    let payouts = &ctx.payouts;
+    let pre_showdown = [
+        contested[0] + uncalled[0],
+        contested[1] + uncalled[1],
+        contested[2] + uncalled[2],
+    ];
+    let dummy_ranks = [
+        debug_eval_rank(&["Ah", "Ad", "Ac", "As", "Kh", "2c", "3d"]),
+        debug_eval_rank(&["Kh", "Kd", "Kc", "Qh", "Qd", "2s", "3s"]),
+        debug_eval_rank(&["9h", "8d", "7c", "5s", "4h", "3c", "2d"]),
+    ];
+    let terminal_cases = [
+        ("S1: BB wins all", [1100.0, 0.0, 2300.0]),
+        ("S2: SB main, BB side", [1100.0, 1500.0, 800.0]),
+        ("S3: SB main, BTN side (BB bust)", [1900.0, 1500.0, 0.0]),
+        ("S4: BTN wins all (both bust)", [3400.0, 0.0, 0.0]),
+    ];
+    for (label, stacks) in terminal_cases {
+        let icm = icm_showdown_equity(stacks, pre_showdown, dummy_ranks, payouts);
+        writeln!(
+            out,
+            "{}: stacks={:?}  BB $EV={:.2}%  full={:?}",
+            label,
+            stacks,
+            icm[2] * 100.0,
+            icm
+        )
+        .unwrap();
+    }
+    writeln!(out).unwrap();
+    writeln!(out, "=== HRC comparison (fill in) ===").unwrap();
+    writeln!(
+        out,
+        "HRC HU (SB fold) EV_call({}) = ?  ours {:.2}%",
+        hand_label,
+        ev_call_hu * 100.0
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "HRC 3-way (SB call) EV_call({}) = ?  ours {:.2}%",
+        hand_label,
+        ev_call_3w * 100.0
+    )
+    .unwrap();
+    writeln!(out).unwrap();
+    if ev_call_3w > ev_call_hu {
+        writeln!(out, "OK: EV_call(3-way) > EV_call(HU)").unwrap();
+    } else {
+        writeln!(
+            out,
+            "ANOMALY: EV_call(3-way) {:.4} <= EV_call(HU) {:.4}",
+            ev_call_3w,
+            ev_call_hu
+        )
+        .unwrap();
+    }
+    if ev_call_3w > ev_fold_3w {
+        writeln!(out, "OK: EV_call(3-way) > EV_fold(3-way) for {hand_label}").unwrap();
+    } else {
+        writeln!(
+            out,
+            "ANOMALY: EV_call(3-way) {:.4} <= EV_fold(3-way) {:.4}",
+            ev_call_3w,
+            ev_fold_3w
+        )
+        .unwrap();
+    }
+
+    Ok(out)
+}
+
+fn combo_range_share(range: &[f64; HAND_TYPES]) -> f64 {
+    let mut used = 0.0;
+    let total: f64 = (0..HAND_TYPES)
+        .map(|idx| expand_combo(idx as u8).len() as f64)
+        .sum();
+    for (idx, &freq) in range.iter().enumerate() {
+        if freq > 0.0 {
+            used += expand_combo(idx as u8).len() as f64;
+        }
+    }
+    if total > 0.0 {
+        used / total
+    } else {
+        0.0
+    }
+}
+
+fn top_combo_range(cache: &EquityCache, target_combo_share: f64) -> [f64; HAND_TYPES] {
+    let mut ranked: Vec<(usize, f64, f64)> = (0..HAND_TYPES)
+        .map(|idx| {
+            let combos = expand_combo(idx as u8).len() as f64;
+            let vs_random = equity_vs_random(cache, idx as u8);
+            (idx, vs_random, combos)
+        })
+        .collect();
+    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let total_combos: f64 = ranked.iter().map(|item| item.2).sum();
+    let mut range = [0.0; HAND_TYPES];
+    let mut used = 0.0;
+    for &(idx, _, combos) in &ranked {
+        if used / total_combos >= target_combo_share {
+            break;
+        }
+        range[idx] = 1.0;
+        used += combos;
+    }
+    range
+}
+
+fn equity_vs_random(cache: &EquityCache, hero: u8) -> f64 {
+    let mut weighted = 0.0;
+    let mut total = 0.0;
+    for villain in 0..HAND_TYPES as u8 {
+        let weight = expand_combo(villain).len() as f64;
+        weighted += weight * cache.equity(hero, villain);
+        total += weight;
+    }
+    if total > 0.0 {
+        weighted / total
+    } else {
+        0.5
+    }
+}
+
+fn hu_equity_vs_range(
+    hero_idx: usize,
+    unblocked: &[u8; HAND_TYPES],
+    villain_freq: &[f64; HAND_TYPES],
+    cache: &EquityCache,
+) -> f64 {
+    let mut weight = 0.0;
+    let mut equity_weight = 0.0;
+    for (villain_idx, &count) in unblocked.iter().enumerate() {
+        let w = count as f64 * villain_freq[villain_idx].clamp(0.0, 1.0);
+        if w <= 0.0 {
+            continue;
+        }
+        weight += w;
+        equity_weight += w * cache.equity(hero_idx as u8, villain_idx as u8);
+    }
+    if weight <= 0.0 {
+        0.5
+    } else {
+        equity_weight / weight
+    }
+}
+
+fn debug_eval_rank(cards: &[&str; 7]) -> crate::hand_evaluator::HandRank {
+    use crate::hand_evaluator::evaluate_hand;
+    use std::str::FromStr;
+    let parsed: [Card; 7] = cards
+        .iter()
+        .map(|s| Card::from_str(s).expect("card"))
+        .collect::<Vec<_>>()
+        .try_into()
+        .unwrap();
+    evaluate_hand(&parsed)
+}
+
+fn classify_bb_scenario(
+    r_btn: crate::hand_evaluator::HandRank,
+    r_sb: crate::hand_evaluator::HandRank,
+    r_bb: crate::hand_evaluator::HandRank,
+) -> u8 {
+    if r_bb > r_sb && r_bb > r_btn {
+        1
+    } else if r_sb > r_bb && r_bb > r_btn {
+        2
+    } else if r_sb > r_btn && r_btn > r_bb {
+        3
+    } else if r_btn > r_sb && r_btn > r_bb {
+        4
+    } else {
+        0
+    }
+}
+
+struct ScenarioBreakdown {
+    report: String,
+}
+
+fn debug_bb_3way_scenarios(
+    hand_idx: usize,
+    btn_push: &[f64; HAND_TYPES],
+    sb_call: &[f64; HAND_TYPES],
+    ctx: &ThreeMaxContext,
+    boards_per_sample: u64,
+) -> ScenarioBreakdown {
+    use crate::equity_3way::{finalize_3way_stacks, icm_showdown_equity};
+    use std::fmt::Write;
+
+    let bb_combo = ctx.combos[hand_idx][0];
+    let contested = ctx.all_in_stacks;
+    let uncalled = ctx.three_way_uncalled;
+    let pre_showdown = [
+        contested[0] + uncalled[0],
+        contested[1] + uncalled[1],
+        contested[2] + uncalled[2],
+    ];
+    let payouts = &ctx.payouts;
+
+    let mut count = [0u64; 5];
+    let mut ev_sum = [0.0; 5];
+
+    let (weights_btn, total_btn) = type_weights(btn_push, ctx);
+    let (weights_sb, total_sb) = type_weights(sb_call, ctx);
+
+    let mut rng = Rng::new(0xBB3A7D1A6 ^ (hand_idx as u64));
+
+    for _ in 0..THREE_WAY_SAMPLES {
+        let Some(btn_hand) = sample_from_weights(
+            &weights_btn,
+            total_btn,
+            &[bb_combo[0], bb_combo[1]],
+            ctx,
+            &mut rng,
+        ) else {
+            continue;
+        };
+        let dead = [bb_combo[0], bb_combo[1], btn_hand[0], btn_hand[1]];
+        let Some(sb_hand) = sample_from_weights(&weights_sb, total_sb, &dead, ctx, &mut rng) else {
+            continue;
+        };
+
+        for _ in 0..boards_per_sample {
+            let (ranks, _board) = sample_ranks(btn_hand, sb_hand, bb_combo, &mut rng);
+            let stacks = finalize_3way_stacks(contested, uncalled, ranks);
+            let icm = icm_showdown_equity(stacks, pre_showdown, ranks, payouts);
+            let scenario = classify_bb_scenario(ranks[0], ranks[1], ranks[2]);
+            let idx = scenario as usize;
+            if idx < count.len() {
+                count[idx] += 1;
+                ev_sum[idx] += icm[2];
+            }
+        }
+    }
+
+    let labels = [
+        "other/tie",
+        "S1",
+        "S2",
+        "S3",
+        "S4",
+    ];
+    let total = count.iter().sum::<u64>().max(1) as f64;
+    let mut weighted_ev = 0.0_f64;
+    let mut out = String::new();
+    for i in 1..5 {
+        if count[i] > 0 {
+            let p = count[i] as f64 / total;
+            let ev = ev_sum[i] / count[i] as f64;
+            weighted_ev += p * ev;
+            writeln!(
+                out,
+                "P({}) = {:.1}%, $EV_BB(S{}) = {:.2}%",
+                labels[i],
+                p * 100.0,
+                i,
+                ev * 100.0
+            )
+            .unwrap();
+        }
+    }
+    writeln!(
+        out,
+        "EV_call_3way = Σ P_i × $EV_i = {:.2}%",
+        weighted_ev * 100.0
+    )
+    .unwrap();
+    let _ = weighted_ev;
+    ScenarioBreakdown { report: out }
+}
+
+fn debug_card_removal(
+    hand_idx: usize,
+    btn_push: &[f64; HAND_TYPES],
+    sb_call: &[f64; HAND_TYPES],
+    ctx: &ThreeMaxContext,
+) -> String {
+    use std::fmt::Write;
+
+    let mut out = String::new();
+    let n_combos = ctx.combos[hand_idx].len().max(1);
+    let mut btn_kept_sum = 0u32;
+    let mut btn_total_sum = 0u32;
+    let mut sb_kept_sum = 0u32;
+    let mut sb_total_sum = 0u32;
+
+    for combo_idx in 0..ctx.combos[hand_idx].len() {
+        let unblocked = &ctx.unblocked[hand_idx][combo_idx];
+        let (btn_kept, btn_total) = range_combo_counts(unblocked, btn_push);
+        let (sb_kept, sb_total) = range_combo_counts(unblocked, sb_call);
+        btn_kept_sum += btn_kept;
+        btn_total_sum += btn_total;
+        sb_kept_sum += sb_kept;
+        sb_total_sum += sb_total;
+    }
+
+    let btn_kept_avg = btn_kept_sum as f64 / n_combos as f64;
+    let btn_total_avg = btn_total_sum as f64 / n_combos as f64;
+    let sb_kept_avg = sb_kept_sum as f64 / n_combos as f64;
+    let sb_total_avg = sb_total_sum as f64 / n_combos as f64;
+
+    writeln!(
+        out,
+        "BB combos: {} (hand type idx={})",
+        ctx.combos[hand_idx].len(),
+        hand_idx
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "BTN push range: {:.0}/{:.0} combos kept ({:.1}%)",
+        btn_kept_avg,
+        btn_total_avg,
+        pct(btn_kept_avg, btn_total_avg)
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "SB call range: {:.0}/{:.0} combos kept ({:.1}%)",
+        sb_kept_avg,
+        sb_total_avg,
+        pct(sb_kept_avg, sb_total_avg)
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "Nominal range sizes: BTN push {:.0} combos, SB call {:.0} combos",
+        btn_total_avg,
+        sb_total_avg
+    )
+    .unwrap();
+    out
+}
+
+fn range_combo_counts(unblocked: &[u8; HAND_TYPES], range: &[f64; HAND_TYPES]) -> (u32, u32) {
+    let mut kept = 0u32;
+    let mut total = 0u32;
+    for (idx, &freq) in range.iter().enumerate() {
+        if freq <= 0.0 {
+            continue;
+        }
+        let combos = expand_combo(idx as u8).len() as u32;
+        total += combos;
+        kept += unblocked[idx] as u32;
+    }
+    (kept, total)
+}
+
+fn pct(kept: f64, total: f64) -> f64 {
+    if total > 0.0 {
+        100.0 * kept / total
+    } else {
+        0.0
+    }
+}
+
+fn sample_ranks(
+    btn_hand: [Card; 2],
+    sb_hand: [Card; 2],
+    bb_hand: [Card; 2],
+    rng: &mut Rng,
+) -> ([crate::hand_evaluator::HandRank; 3], [Card; 5]) {
+    use crate::hand_evaluator::evaluate_hand;
+    let dead = [
+        btn_hand[0],
+        btn_hand[1],
+        sb_hand[0],
+        sb_hand[1],
+        bb_hand[0],
+        bb_hand[1],
+    ];
+    let available = available_cards_debug(&dead);
+    let board = sample_board_debug(&available, rng);
+    let ranks = [
+        evaluate_hand(&[
+            btn_hand[0],
+            btn_hand[1],
+            board[0],
+            board[1],
+            board[2],
+            board[3],
+            board[4],
+        ]),
+        evaluate_hand(&[
+            sb_hand[0],
+            sb_hand[1],
+            board[0],
+            board[1],
+            board[2],
+            board[3],
+            board[4],
+        ]),
+        evaluate_hand(&[
+            bb_hand[0],
+            bb_hand[1],
+            board[0],
+            board[1],
+            board[2],
+            board[3],
+            board[4],
+        ]),
+    ];
+    (ranks, board)
+}
+
+fn available_cards_debug(dead: &[Card]) -> Vec<Card> {
+    let mut cards = Vec::new();
+    for rank in 2..=14 {
+        for suit in 0..4 {
+            let c = Card::new(rank, suit);
+            if !dead.iter().any(|d| *d == c) {
+                cards.push(c);
+            }
+        }
+    }
+    cards
+}
+
+fn sample_board_debug(available: &[Card], rng: &mut Rng) -> [Card; 5] {
+    let mut pool = available.to_vec();
+    for i in 0..5 {
+        let j = i + rng.gen_range(pool.len() - i);
+        pool.swap(i, j);
+    }
+    [pool[0], pool[1], pool[2], pool[3], pool[4]]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1114,6 +1703,25 @@ mod tests {
                 .join("equity_cache.bin");
             EquityCache::load(&path).expect("equity_cache.bin")
         })
+    }
+
+    #[test]
+    fn three_way_effective_stacks_used() {
+        let input = SolverInput {
+            stacks: vec![2000.0, 500.0, 900.0],
+            payouts: vec![0.5, 0.3, 0.2],
+            small_blind: 50.0,
+            big_blind: 100.0,
+            ante: 0.0,
+            button_index: 0,
+            max_iterations: 1,
+            tolerance: 0.001,
+            num_players: 3,
+            verbose_convergence: false,
+        };
+        let ctx = ThreeMaxContext::new(&input, ThreeWayCache::new()).expect("ctx");
+        assert_eq!(ctx.all_in_stacks, [900.0, 500.0, 900.0]);
+        assert_eq!(ctx.three_way_uncalled, [1100.0, 0.0, 0.0]);
     }
 
     #[test]

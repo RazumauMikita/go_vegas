@@ -1,10 +1,11 @@
 use std::env;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::str::FromStr;
 
 use poker_core::{
-    combo_index, combo_label, index_to_ranks, Card, EquityCache, SolverInput, SolverOutput,
-    ThreeMaxRanges,
+    combo_index, combo_label, equity_3way_icm, index_to_ranks, Card, EquityCache, SolverInput,
+    SolverOutput, ThreeMaxRanges,
 };
 
 fn main() -> ExitCode {
@@ -25,6 +26,14 @@ fn run(args: Vec<String>) -> Result<(), String> {
     }
 
     let config = parse_args(args)?;
+    if config.debug_3way {
+        run_debug_3way(&config)?;
+        return Ok(());
+    }
+    if let Some(hand) = config.debug_bb.as_ref() {
+        run_debug_bb(&config, hand)?;
+        return Ok(());
+    }
     let cache = EquityCache::load(&config.cache).map_err(|error| {
         format!(
             "failed to load cache from {}: {error}",
@@ -63,6 +72,8 @@ struct Config {
     num_players: usize,
     cache: PathBuf,
     verbose_convergence: bool,
+    debug_3way: bool,
+    debug_bb: Option<String>,
 }
 
 fn parse_args(args: Vec<String>) -> Result<Config, String> {
@@ -75,6 +86,8 @@ fn parse_args(args: Vec<String>) -> Result<Config, String> {
     let mut tolerance = 0.001;
     let mut cache = PathBuf::from("equity_cache.bin");
     let mut verbose_convergence = false;
+    let mut debug_3way = false;
+    let mut debug_bb = None;
     let mut index = 0;
 
     while index < args.len() {
@@ -146,6 +159,12 @@ fn parse_args(args: Vec<String>) -> Result<Config, String> {
             "--verbose-convergence" => {
                 verbose_convergence = true;
             }
+            "--debug-3way" => {
+                debug_3way = true;
+            }
+            other if other.starts_with("--debug-bb=") => {
+                debug_bb = Some(other["--debug-bb=".len()..].to_string());
+            }
             other => return Err(format!("unknown argument: {other}")),
         }
         index += 1;
@@ -183,7 +202,110 @@ fn parse_args(args: Vec<String>) -> Result<Config, String> {
         tolerance,
         cache,
         verbose_convergence,
+        debug_3way,
+        debug_bb,
     })
+}
+
+fn run_debug_bb(config: &Config, hand_label: &str) -> Result<(), String> {
+    if config.stacks.len() != 3 {
+        return Err("--debug-bb requires exactly 3 stacks".to_string());
+    }
+    let cache = EquityCache::load(&config.cache).map_err(|error| {
+        format!(
+            "failed to load cache from {}: {error}",
+            config.cache.display()
+        )
+    })?;
+    let input = SolverInput {
+        stacks: config.stacks.clone(),
+        payouts: config.payouts.clone(),
+        small_blind: config.small_blind,
+        big_blind: config.big_blind,
+        ante: config.ante,
+        button_index: config.button_index,
+        max_iterations: config.max_iterations,
+        tolerance: config.tolerance,
+        num_players: 3,
+        verbose_convergence: false,
+    };
+    let report = poker_core::debug_bb_report(&input, &cache, hand_label, 0.65, 0.21)?;
+    println!("{report}");
+    Ok(())
+}
+
+fn three_way_effective(stacks: &[f64], btn: usize, sb: usize, bb: usize) -> ([f64; 3], [f64; 3]) {
+    let seat = [stacks[btn], stacks[sb], stacks[bb]];
+    let max_other = [
+        seat[1].max(seat[2]),
+        seat[0].max(seat[2]),
+        seat[0].max(seat[1]),
+    ];
+    let contested = [
+        seat[0].min(max_other[0]),
+        seat[1].min(max_other[1]),
+        seat[2].min(max_other[2]),
+    ];
+    let uncalled = [
+        seat[0] - contested[0],
+        seat[1] - contested[1],
+        seat[2] - contested[2],
+    ];
+    (contested, uncalled)
+}
+
+fn run_debug_3way(config: &Config) -> Result<(), String> {
+    if config.stacks.len() != 3 {
+        return Err("--debug-3way requires exactly 3 stacks".to_string());
+    }
+    let btn = config.button_index;
+    let sb = (btn + 1) % 3;
+    let bb = (btn + 2) % 3;
+    let (contested, uncalled) = three_way_effective(&config.stacks, btn, sb, bb);
+
+    let btn_hand = parse_hand("As", "Ks")?;
+    let sb_hand = parse_hand("Qh", "Qd")?;
+    let bb_hand = parse_hand("7c", "7d")?;
+    let payouts = &config.payouts;
+
+    println!("3-way ICM debug (BTN AsKs / SB QhQd / BB 7c7d)");
+    println!(
+        "Stacks: BTN={} SB={} BB={}",
+        config.stacks[btn],
+        config.stacks[sb],
+        config.stacks[bb]
+    );
+    println!("Contested (btn,sb,bb): {:?}", contested);
+    println!("Uncalled  (btn,sb,bb): {:?}", uncalled);
+    println!();
+
+    for iterations in [12_u64, 1000, 10_000] {
+        let ev = equity_3way_icm(
+            btn_hand,
+            sb_hand,
+            bb_hand,
+            contested,
+            uncalled,
+            payouts,
+            iterations,
+        );
+        println!(
+            "iterations={iterations:>5}: BTN ${:.4}  SB ${:.4}  BB ${:.4}",
+            ev[0],
+            ev[1],
+            ev[2]
+        );
+    }
+
+    Ok(())
+}
+
+fn parse_hand(rank_suit1: &str, rank_suit2: &str) -> Result<[Card; 2], String> {
+    let c1 = Card::from_str(rank_suit1)
+        .map_err(|error| format!("invalid card {rank_suit1}: {error:?}"))?;
+    let c2 = Card::from_str(rank_suit2)
+        .map_err(|error| format!("invalid card {rank_suit2}: {error:?}"))?;
+    Ok([c1, c2])
 }
 
 fn parse_number_list(input: &str, label: &str) -> Result<Vec<f64>, String> {
@@ -380,6 +502,7 @@ Options:
   --ante N
   --button N
   --iterations N   (default 50)
-  --tolerance X    (default 0.001)"
+  --tolerance X    (default 0.001)
+  --debug-3way     (print 3-way ICM MC convergence for AsKs/QhQd/7c7d)"
     );
 }

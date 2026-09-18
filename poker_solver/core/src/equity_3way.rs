@@ -154,12 +154,29 @@ pub fn resolve_3way_showdown(stacks: [f64; 3], ranks: [HandRank; 3]) -> [f64; 3]
     won
 }
 
+/// Финальные стеки после 3-way all-in: side pots по contested-стекам + uncalled.
+pub fn finalize_3way_stacks(
+    contested: [f64; 3],
+    uncalled: [f64; 3],
+    ranks: [HandRank; 3],
+) -> [f64; 3] {
+    let mut stacks = resolve_3way_showdown(contested, ranks);
+    for i in 0..3 {
+        stacks[i] += uncalled[i];
+    }
+    stacks
+}
+
 /// $EV трёх игроков после 3-way all-in: side pots, затем ICM оставшихся стеков.
+///
+/// `contested` — эффективные олл-ин стеки (btn, sb, bb).
+/// `uncalled` — фишки, возвращённые до расчёта ICM (например, overbet BTN).
 pub fn equity_3way_icm(
     hand1: [Card; 2],
     hand2: [Card; 2],
     hand3: [Card; 2],
-    stacks: [f64; 3],
+    contested: [f64; 3],
+    uncalled: [f64; 3],
     payouts: &[f64],
     iterations: u64,
 ) -> [f64; 3] {
@@ -187,8 +204,13 @@ pub fn equity_3way_icm(
             evaluate_seven(hand2, board),
             evaluate_seven(hand3, board),
         ];
-        let new_stacks = resolve_3way_showdown(stacks, ranks);
-        let sample = icm_after_showdown(new_stacks, ranks, payouts);
+        let new_stacks = finalize_3way_stacks(contested, uncalled, ranks);
+        let pre_showdown = [
+            contested[0] + uncalled[0],
+            contested[1] + uncalled[1],
+            contested[2] + uncalled[2],
+        ];
+        let sample = icm_after_showdown(new_stacks, pre_showdown, ranks, payouts);
         ev[0] += sample[0];
         ev[1] += sample[1];
         ev[2] += sample[2];
@@ -198,7 +220,22 @@ pub fn equity_3way_icm(
     [ev[0] / total, ev[1] / total, ev[2] / total]
 }
 
-fn icm_after_showdown(new_stacks: [f64; 3], ranks: [HandRank; 3], payouts: &[f64]) -> [f64; 3] {
+/// $EV после 3-way showdown (для диагностики).
+pub fn icm_showdown_equity(
+    new_stacks: [f64; 3],
+    pre_showdown_stacks: [f64; 3],
+    ranks: [HandRank; 3],
+    payouts: &[f64],
+) -> [f64; 3] {
+    icm_after_showdown(new_stacks, pre_showdown_stacks, ranks, payouts)
+}
+
+fn icm_after_showdown(
+    new_stacks: [f64; 3],
+    pre_showdown_stacks: [f64; 3],
+    _ranks: [HandRank; 3],
+    payouts: &[f64],
+) -> [f64; 3] {
     let alive: Vec<usize> = (0..3).filter(|&i| new_stacks[i] > 0.0).collect();
     let busted: Vec<usize> = (0..3).filter(|&i| new_stacks[i] <= 0.0).collect();
     let mut ev = [0.0; 3];
@@ -206,10 +243,13 @@ fn icm_after_showdown(new_stacks: [f64; 3], ranks: [HandRank; 3], payouts: &[f64
     if !busted.is_empty() {
         let first_place = alive.len();
         for &player in &busted {
-            let better = busted.iter().filter(|&&j| ranks[j] > ranks[player]).count();
+            let better = busted
+                .iter()
+                .filter(|&&j| pre_showdown_stacks[j] > pre_showdown_stacks[player])
+                .count();
             let tied = busted
                 .iter()
-                .filter(|&&j| ranks[j] == ranks[player])
+                .filter(|&&j| pre_showdown_stacks[j] == pre_showdown_stacks[player])
                 .count()
                 .max(1);
             let mut prize = 0.0;
@@ -435,6 +475,14 @@ mod tests {
     }
 
     #[test]
+    fn finalize_effective_matches_full_overbet() {
+        let ranks = [btn_wins(), sb_mid(), bb_lose()];
+        let full = finalize_3way_stacks([2000.0, 500.0, 900.0], [0.0, 0.0, 0.0], ranks);
+        let effective = finalize_3way_stacks([900.0, 500.0, 900.0], [1100.0, 0.0, 0.0], ranks);
+        assert_stacks(full, effective);
+    }
+
+    #[test]
     fn resolve_all_equal_stacks() {
         let new_stacks =
             resolve_3way_showdown([1000.0, 1000.0, 1000.0], [btn_wins(), sb_mid(), bb_lose()]);
@@ -463,11 +511,23 @@ mod tests {
     }
 
     #[test]
+    fn busted_tiebreak_by_pre_showdown_stack() {
+        let payouts = [0.5, 0.3, 0.2];
+        let pre = [2000.0, 500.0, 900.0];
+        let ranks = [btn_wins(), sb_mid(), bb_lose()];
+        let ev = icm_after_showdown([3400.0, 0.0, 0.0], pre, ranks, &payouts);
+        assert!((ev[0] - 0.5).abs() < 1e-9, "BTN ICM {}", ev[0]);
+        assert!((ev[1] - 0.2).abs() < 1e-9, "SB 3rd ICM {}", ev[1]);
+        assert!((ev[2] - 0.3).abs() < 1e-9, "BB 2nd ICM {}", ev[2]);
+    }
+
+    #[test]
     fn bb_surviving_loss_keeps_high_icm() {
         let payouts = [0.5, 0.3, 0.2];
         let lose_ranks = [btn_wins(), sb_mid(), bb_lose()];
         let lose_stacks = resolve_3way_showdown([500.0, 1000.0, 5000.0], lose_ranks);
-        let lose_ev = icm_after_showdown(lose_stacks, lose_ranks, &payouts);
+        let pre = [500.0, 1000.0, 5000.0];
+        let lose_ev = icm_after_showdown(lose_stacks, pre, lose_ranks, &payouts);
         assert!(
             lose_ev[2] > 0.35,
             "BB leftover chips ICM {}, stacks {lose_stacks:?}",
@@ -476,13 +536,21 @@ mod tests {
 
         let win_ranks = [btn_lose(), sb_mid(), bb_wins()];
         let win_stacks = resolve_3way_showdown([500.0, 1000.0, 5000.0], win_ranks);
-        let win_ev = icm_after_showdown(win_stacks, win_ranks, &payouts);
+        let win_ev = icm_after_showdown(win_stacks, pre, win_ranks, &payouts);
         assert!((win_ev[2] - 0.5).abs() < 1e-9, "BB win ICM {}", win_ev[2]);
 
         let aa = hand("Ah", "Ad");
         let kk = hand("Kh", "Kd");
         let qq = hand("Qh", "Qd");
-        let as_bb = equity_3way_icm(aa, kk, qq, [5000.0, 500.0, 1000.0], &payouts, 800);
+        let as_bb = equity_3way_icm(
+            aa,
+            kk,
+            qq,
+            [1000.0, 500.0, 1000.0],
+            [4000.0, 0.0, 0.0],
+            &payouts,
+            800,
+        );
         assert!(as_bb[0] > 0.45, "AA as BB 3-way EV {}", as_bb[0]);
     }
 }
