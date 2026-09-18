@@ -89,7 +89,9 @@ impl IcmTab {
 
         let payout_sum: f64 = payouts.iter().sum();
         if (payout_sum - 1.0).abs() > 1e-9 {
-            self.error = Some(format!("payouts должны суммироваться в 1.0, получено {payout_sum}"));
+            self.error = Some(format!(
+                "payouts должны суммироваться в 1.0, получено {payout_sum}"
+            ));
             return;
         }
 
@@ -107,8 +109,11 @@ impl IcmTab {
 
     fn show_result(&self, ui: &mut Ui, result: &IcmCalculation) {
         ui.label(
-            RichText::new(format!("Время расчёта: {}", format_duration(result.duration)))
-                .strong(),
+            RichText::new(format!(
+                "Время расчёта: {}",
+                format_duration(result.duration)
+            ))
+            .strong(),
         );
         ui.label(format!(
             "Payouts: {}",
@@ -130,7 +135,9 @@ impl IcmTab {
                 ui.label("$EV");
                 ui.end_row();
 
-                for (index, (&stack, &equity)) in result.stacks.iter().zip(result.equities.iter()).enumerate() {
+                for (index, (&stack, &equity)) in
+                    result.stacks.iter().zip(result.equities.iter()).enumerate()
+                {
                     ui.label(format!("Player {}", index + 1));
                     ui.label(format!("{stack:.0}"));
                     ui.label(format!("{equity:.4}"));

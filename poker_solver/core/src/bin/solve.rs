@@ -42,6 +42,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
         max_iterations: config.max_iterations,
         tolerance: config.tolerance,
         num_players: config.num_players,
+        verbose_convergence: config.verbose_convergence,
     };
 
     let output = poker_core::solve(&input, &cache);
@@ -61,6 +62,7 @@ struct Config {
     tolerance: f64,
     num_players: usize,
     cache: PathBuf,
+    verbose_convergence: bool,
 }
 
 fn parse_args(args: Vec<String>) -> Result<Config, String> {
@@ -72,6 +74,7 @@ fn parse_args(args: Vec<String>) -> Result<Config, String> {
     let mut max_iterations = 50_usize;
     let mut tolerance = 0.001;
     let mut cache = PathBuf::from("equity_cache.bin");
+    let mut verbose_convergence = false;
     let mut index = 0;
 
     while index < args.len() {
@@ -115,7 +118,7 @@ fn parse_args(args: Vec<String>) -> Result<Config, String> {
                     .parse()
                     .map_err(|_| format!("invalid button value: {value}"))?;
             }
-            "--iterations" => {
+            "--iterations" | "--max-iterations" => {
                 index += 1;
                 let value = args
                     .get(index)
@@ -139,6 +142,9 @@ fn parse_args(args: Vec<String>) -> Result<Config, String> {
                     args.get(index)
                         .ok_or_else(|| "--cache requires a path".to_string())?,
                 );
+            }
+            "--verbose-convergence" => {
+                verbose_convergence = true;
             }
             other => return Err(format!("unknown argument: {other}")),
         }
@@ -176,6 +182,7 @@ fn parse_args(args: Vec<String>) -> Result<Config, String> {
         max_iterations,
         tolerance,
         cache,
+        verbose_convergence,
     })
 }
 

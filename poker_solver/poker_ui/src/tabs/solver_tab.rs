@@ -33,6 +33,7 @@ pub struct SolverTab {
     small_blind: String,
     big_blind: String,
     max_iterations: String,
+    tolerance: String,
     equity_cache: EquityCache,
     matrix_modes: HashMap<String, MatrixMode>,
     error: Option<String>,
@@ -52,6 +53,7 @@ impl Default for SolverTab {
             small_blind: "50".to_string(),
             big_blind: "100".to_string(),
             max_iterations: "100".to_string(),
+            tolerance: "0.00001".to_string(),
             equity_cache: EquityCache::from_bytes(CACHE_BYTES).expect("embedded cache corrupted"),
             matrix_modes: HashMap::new(),
             error: None,
@@ -147,7 +149,12 @@ impl SolverTab {
             }
         });
 
-        let bb = self.big_blind.trim().parse::<f64>().unwrap_or(100.0).max(1e-9);
+        let bb = self
+            .big_blind
+            .trim()
+            .parse::<f64>()
+            .unwrap_or(100.0)
+            .max(1e-9);
 
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
@@ -198,8 +205,7 @@ impl SolverTab {
                     });
 
                 ui.horizontal(|ui| {
-                    if ui.button("+").clicked() && self.prize_percents.len() < self.player_count
-                    {
+                    if ui.button("+").clicked() && self.prize_percents.len() < self.player_count {
                         self.prize_percents.push("0".to_string());
                     }
                     if ui.button("−").clicked() && self.prize_percents.len() > 1 {
@@ -215,6 +221,8 @@ impl SolverTab {
             compact_param_field(ui, "BB:", &mut self.big_blind, 70.0);
             ui.add_space(8.0);
             compact_param_field(ui, "Iter:", &mut self.max_iterations, 70.0);
+            ui.add_space(8.0);
+            compact_param_field(ui, "Tol:", &mut self.tolerance, 80.0);
         });
 
         if let Some(pool_size) = self.parse_prize_sum() {
@@ -266,19 +274,17 @@ impl SolverTab {
         );
         ui.add_space(8.0);
 
-        let path = self
-            .selected_path
-            .clone()
-            .or_else(|| if self.tree.is_empty() { None } else { Some(vec![0]) });
+        let path = self.selected_path.clone().or_else(|| {
+            if self.tree.is_empty() {
+                None
+            } else {
+                Some(vec![0])
+            }
+        });
 
         if let Some(path) = path {
-            let node_data = node_at_path(&self.tree, &path).map(|node| {
-                (
-                    node.label.clone(),
-                    node.range,
-                    node.ev_range,
-                )
-            });
+            let node_data = node_at_path(&self.tree, &path)
+                .map(|node| (node.label.clone(), node.range, node.ev_range));
 
             if let Some((label, range, ev_range)) = node_data {
                 {
@@ -415,6 +421,14 @@ impl SolverTab {
         if max_iterations == 0 {
             return Err("max iterations должен быть больше 0".to_string());
         }
+        let tolerance = self
+            .tolerance
+            .trim()
+            .parse::<f64>()
+            .map_err(|_| format!("некорректный tolerance: {}", self.tolerance))?;
+        if tolerance <= 0.0 {
+            return Err("tolerance должен быть больше 0".to_string());
+        }
 
         Ok(SolverInput {
             stacks,
@@ -424,8 +438,9 @@ impl SolverTab {
             ante: 0.0,
             button_index: 0,
             max_iterations,
-            tolerance: 0.001,
+            tolerance,
             num_players: self.player_count,
+            verbose_convergence: false,
         })
     }
 
@@ -486,9 +501,7 @@ const PARAM_FIELD_WIDTH: f32 = 70.0;
 
 fn compact_param_field(ui: &mut Ui, label: &str, value: &mut String, width: f32) {
     ui.label(label);
-    ui.add(
-        egui::TextEdit::singleline(value).desired_width(width.max(PARAM_FIELD_WIDTH)),
-    );
+    ui.add(egui::TextEdit::singleline(value).desired_width(width.max(PARAM_FIELD_WIDTH)));
 }
 
 fn right_label(ui: &mut Ui, text: &str) {
@@ -554,6 +567,7 @@ mod tests {
         assert_eq!(input.small_blind, 50.0);
         assert_eq!(input.big_blind, 100.0);
         assert_eq!(input.max_iterations, 100);
+        assert!((input.tolerance - 0.00001).abs() < 1e-12);
     }
 
     #[test]

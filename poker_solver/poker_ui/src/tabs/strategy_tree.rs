@@ -99,7 +99,13 @@ pub fn draw_strategy_tree(
         });
 
         if node.expanded && !node.children.is_empty() {
-            draw_strategy_tree(ui, &mut node.children, selected_path, &current_path, depth + 1);
+            draw_strategy_tree(
+                ui,
+                &mut node.children,
+                selected_path,
+                &current_path,
+                depth + 1,
+            );
         }
     }
 }

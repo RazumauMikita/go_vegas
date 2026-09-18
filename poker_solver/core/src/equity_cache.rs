@@ -701,10 +701,7 @@ mod tests {
     #[test]
     fn from_bytes_wrong_size_fails() {
         let result = EquityCache::from_bytes(&[0_u8; 16]);
-        assert!(matches!(
-            result,
-            Err(EquityCacheError::InvalidSize { .. })
-        ));
+        assert!(matches!(result, Err(EquityCacheError::InvalidSize { .. })));
     }
 
     #[test]

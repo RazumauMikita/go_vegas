@@ -81,8 +81,11 @@ impl EvalTab {
 
     fn show_result(&self, ui: &mut Ui, result: &EvalCalculation) {
         ui.label(
-            RichText::new(format!("Время расчёта: {}", format_duration(result.duration)))
-                .strong(),
+            RichText::new(format!(
+                "Время расчёта: {}",
+                format_duration(result.duration)
+            ))
+            .strong(),
         );
         ui.label(format!("Карты: {}", result.cards_text));
         ui.label(format!("Категория: {}", category_name(result.category)));

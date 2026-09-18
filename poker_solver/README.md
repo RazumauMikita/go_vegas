@@ -8,10 +8,53 @@
 - Оценщик 7-карточных рук (`HandRank`)
 - Тесты evaluator
 
-## Сборка и тесты
+## Сборка и запуск
+
+Все команды — из корня проекта (`poker_solver/`). Нужен [Rust](https://rustup.rs/) (`cargo`).
+
+### Сборка
 
 ```bash
+# Debug (быстрее собирается)
 cargo build
+
+# Release (нужен для солвера и GUI)
+cargo build --release
+
+# Только CLI-солвер
+cargo build --release --bin solve
+
+# Только GUI
+cargo build --release -p poker_ui
+```
+
+Бинарники: `target/release/solve.exe`, `target/release/poker_ui.exe` (на Linux/macOS без `.exe`).
+
+### Запуск GUI
+
+```bash
+cargo run --release -p poker_ui
+```
+
+Или после сборки: `target/release/poker_ui.exe`.
+
+### Запуск солвера (CLI)
+
+Нужен `equity_cache.bin` в текущей директории (или путь через `--cache`).
+
+```bash
+# HU 10bb
+cargo run --release --bin solve -- --stacks 1000,1000 --payouts 0.625,0.375 --blinds 50,100 --cache equity_cache.bin
+
+# 3-max 10bb
+cargo run --release --bin solve -- --stacks 1000,1000,1000 --payouts 0.5,0.3,0.2 --blinds 50,100 --cache equity_cache.bin
+```
+
+Первый 3-max прогон создаёт `equity_3way_cache.bin` (~19 MB) рядом с командой. Повторный запуск читает этот файл и проходит заметно быстрее.
+
+### Тесты
+
+```bash
 cargo test
 cargo test --release
 ```

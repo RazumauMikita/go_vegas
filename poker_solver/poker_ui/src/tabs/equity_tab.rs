@@ -118,10 +118,7 @@ impl EquityTab {
             match self.iterations.trim().parse::<u64>() {
                 Ok(value) if value > 0 => value,
                 _ => {
-                    self.error = Some(format!(
-                        "некорректные iterations: {}",
-                        self.iterations
-                    ));
+                    self.error = Some(format!("некорректные iterations: {}", self.iterations));
                     return;
                 }
             }
@@ -162,8 +159,11 @@ impl EquityTab {
 
     fn show_result(&self, ui: &mut Ui, result: &EquityCalculation) {
         ui.label(
-            RichText::new(format!("Время расчёта: {}", format_duration(result.duration)))
-                .strong(),
+            RichText::new(format!(
+                "Время расчёта: {}",
+                format_duration(result.duration)
+            ))
+            .strong(),
         );
         ui.label(format!("Hero: {}", result.hero_label));
         ui.label(format!("Villain: {}", result.villain_label));

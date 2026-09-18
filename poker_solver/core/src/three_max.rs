@@ -1,18 +1,33 @@
+use std::path::Path;
+use std::time::Instant;
+
 use rayon::prelude::*;
 
 use crate::card::Card;
-use crate::equity_3way::equity_3way_places;
-use crate::equity_cache::{expand_combo, EquityCache};
+use crate::equity_3way::equity_3way_icm;
+use crate::equity_cache::{combo_index, expand_combo, EquityCache};
 use crate::solver::{
     best_response, build_unblocked, empty_output, tournament_equity, transfer, SolverInput,
     SolverOutput, ThreeMaxHandEvs, ThreeMaxRanges, HAND_EV_SCALE, HAND_TYPES,
 };
+use crate::three_way_cache::ThreeWayCache;
 
 const THREE_WAY_SAMPLES: u32 = 64;
 const THREE_WAY_BOARDS: u64 = 12;
+const THREE_WAY_CACHE_FILE: &str = "equity_3way_cache.bin";
 
 pub(crate) fn solve_3max(input: &SolverInput, cache: &EquityCache) -> SolverOutput {
-    let Some(ctx) = ThreeMaxContext::new(input) else {
+    let solve_started = Instant::now();
+    let three_way_path = Path::new(THREE_WAY_CACHE_FILE);
+    let stacks_equal = input.stacks.len() == 3
+        && input.stacks[0] == input.stacks[1]
+        && input.stacks[1] == input.stacks[2];
+    let three_way = if stacks_equal {
+        ThreeWayCache::load(three_way_path).unwrap_or_else(|_| ThreeWayCache::new())
+    } else {
+        ThreeWayCache::new()
+    };
+    let Some(ctx) = ThreeMaxContext::new(input, three_way) else {
         return empty_output(input.stacks.len());
     };
 
@@ -35,6 +50,9 @@ pub(crate) fn solve_3max(input: &SolverInput, cache: &EquityCache) -> SolverOutp
 
     for iteration in 1..=input.max_iterations {
         iterations_used = iteration;
+        let iter_started = Instant::now();
+        let hits_before = ctx.cache_hits();
+        let misses_before = ctx.cache_misses();
 
         let br_btn_push: Vec<f64> = (0..HAND_TYPES)
             .into_par_iter()
@@ -97,6 +115,8 @@ pub(crate) fn solve_3max(input: &SolverInput, cache: &EquityCache) -> SolverOutp
 
         let t = iteration as f64;
         let mut change = 0.0;
+        let mut push_change = 0.0;
+        let mut call_change = 0.0;
         for hand in 0..HAND_TYPES {
             sum_btn_push[hand] += br_btn_push[hand];
             sum_sb_call[hand] += br_sb_call[hand];
@@ -119,6 +139,13 @@ pub(crate) fn solve_3max(input: &SolverInput, cache: &EquityCache) -> SolverOutp
             change += (next_sb_push - sb_push[hand]).abs();
             change += (next_bb_sb - bb_call_vs_sb[hand]).abs();
 
+            push_change += (next_btn - btn_push[hand]).abs();
+            push_change += (next_sb_push - sb_push[hand]).abs();
+            call_change += (next_sb_call - sb_call_vs_btn[hand]).abs();
+            call_change += (next_bb_btn - bb_call_vs_btn[hand]).abs();
+            call_change += (next_bb_both - bb_call_vs_both[hand]).abs();
+            call_change += (next_bb_sb - bb_call_vs_sb[hand]).abs();
+
             btn_push[hand] = next_btn;
             sb_call_vs_btn[hand] = next_sb_call;
             bb_call_vs_btn[hand] = next_bb_btn;
@@ -128,6 +155,27 @@ pub(crate) fn solve_3max(input: &SolverInput, cache: &EquityCache) -> SolverOutp
         }
 
         let mean_change = change / (6.0 * HAND_TYPES as f64);
+        let hits = ctx.cache_hits() - hits_before;
+        let misses = ctx.cache_misses() - misses_before;
+        let looked = hits + misses;
+        let hit_pct = if looked == 0 {
+            100.0
+        } else {
+            100.0 * hits as f64 / looked as f64
+        };
+        if input.verbose_convergence {
+            let last_ten_start = input.max_iterations.saturating_sub(9);
+            if iteration <= 50 || iteration >= last_ten_start {
+                eprintln!(
+                    "Iter {iteration}: push_change={push_change:.6} call_change={call_change:.6}"
+                );
+            }
+        } else {
+            eprintln!(
+                "Iter {iteration}: {:.2}s, hits: {hit_pct:.1}%",
+                iter_started.elapsed().as_secs_f64()
+            );
+        }
         if change < input.tolerance || mean_change < input.tolerance {
             converged = true;
             break;
@@ -188,6 +236,22 @@ pub(crate) fn solve_3max(input: &SolverInput, cache: &EquityCache) -> SolverOutp
     hand_evs[ctx.btn] = three_max_hand_evs.btn_push;
     hand_evs[ctx.sb] = three_max_hand_evs.sb_push;
     hand_evs[ctx.bb] = three_max_hand_evs.bb_call_vs_btn;
+
+    let hits = ctx.cache_hits();
+    let misses = ctx.cache_misses();
+    let looked = hits + misses;
+    let hit_pct = if looked == 0 {
+        100.0
+    } else {
+        100.0 * hits as f64 / looked as f64
+    };
+    eprintln!("Cache 3-way: {hits} hits / {misses} misses ({hit_pct:.1}% hit rate)");
+    eprintln!("Solve time: {:.2}s", solve_started.elapsed().as_secs_f64());
+    if misses > 0 && ctx.stacks_equal {
+        if let Err(error) = ctx.three_way.save(three_way_path) {
+            eprintln!("failed to save 3-way cache: {error}");
+        }
+    }
 
     SolverOutput {
         push_ranges,
@@ -284,10 +348,14 @@ struct ThreeMaxContext {
     icm_hu_btn_sb_bb_fold_sb_win: Vec<f64>,
     icm_hu_sb_bb_btn_fold_sb_win: Vec<f64>,
     icm_hu_sb_bb_btn_fold_bb_win: Vec<f64>,
+    all_in_stacks: [f64; 3],
+    stacks_equal: bool,
+    three_way: ThreeWayCache,
+    seat_caches: Vec<ThreeWayCache>,
 }
 
 impl ThreeMaxContext {
-    fn new(input: &SolverInput) -> Option<Self> {
+    fn new(input: &SolverInput, three_way: ThreeWayCache) -> Option<Self> {
         if input.stacks.len() != 3 {
             return None;
         }
@@ -339,6 +407,19 @@ impl ThreeMaxContext {
         let icm_hu_sb_bb_btn_fold_bb_win =
             tournament_equity(&hu_with_dead(stacks, btn, btn_dead, sb, bb, bb), &payouts);
 
+        let all_in_stacks = [stacks[btn], stacks[sb], stacks[bb]];
+        let stacks_equal =
+            all_in_stacks[0] == all_in_stacks[1] && all_in_stacks[1] == all_in_stacks[2];
+        let seat_caches = if stacks_equal {
+            Vec::new()
+        } else {
+            vec![
+                ThreeWayCache::new(),
+                ThreeWayCache::new(),
+                ThreeWayCache::new(),
+            ]
+        };
+
         Some(Self {
             btn,
             sb,
@@ -355,7 +436,27 @@ impl ThreeMaxContext {
             icm_hu_btn_sb_bb_fold_sb_win,
             icm_hu_sb_bb_btn_fold_sb_win,
             icm_hu_sb_bb_btn_fold_bb_win,
+            all_in_stacks,
+            stacks_equal,
+            three_way,
+            seat_caches,
         })
+    }
+
+    fn cache_hits(&self) -> usize {
+        if self.stacks_equal {
+            self.three_way.hit_count()
+        } else {
+            self.seat_caches.iter().map(ThreeWayCache::hit_count).sum()
+        }
+    }
+
+    fn cache_misses(&self) -> usize {
+        if self.stacks_equal {
+            self.three_way.miss_count()
+        } else {
+            self.seat_caches.iter().map(ThreeWayCache::miss_count).sum()
+        }
     }
 }
 
@@ -863,26 +964,45 @@ fn three_way_ev(
             continue;
         };
         both_ok += 1.0;
-        let ordered = if hero_seat == ctx.btn {
-            [hero, hand_a, hand_b]
-        } else if hero_seat == ctx.sb {
-            [hand_a, hero, hand_b]
+        ev += if ctx.stacks_equal {
+            ctx.three_way.get_or_compute(
+                combo_index(hero),
+                combo_index(hand_a),
+                combo_index(hand_b),
+                || {
+                    equity_3way_icm(
+                        hero,
+                        hand_a,
+                        hand_b,
+                        ctx.all_in_stacks,
+                        &ctx.payouts,
+                        THREE_WAY_BOARDS,
+                    )[0]
+                },
+            )
         } else {
-            [hand_a, hand_b, hero]
-        };
-        let places = equity_3way_places(
-            ordered[0],
-            ordered[1],
-            ordered[2],
-            &ctx.payouts,
-            THREE_WAY_BOARDS,
-        );
-        ev += if hero_seat == ctx.btn {
-            places[0]
-        } else if hero_seat == ctx.sb {
-            places[1]
-        } else {
-            places[2]
+            let (btn_h, sb_h, bb_h, hero_idx) = if hero_seat == ctx.btn {
+                (hero, hand_a, hand_b, 0)
+            } else if hero_seat == ctx.sb {
+                (hand_a, hero, hand_b, 1)
+            } else {
+                (hand_a, hand_b, hero, 2)
+            };
+            ctx.seat_caches[hero_idx].get_or_compute(
+                combo_index(btn_h),
+                combo_index(sb_h),
+                combo_index(bb_h),
+                || {
+                    equity_3way_icm(
+                        btn_h,
+                        sb_h,
+                        bb_h,
+                        ctx.all_in_stacks,
+                        &ctx.payouts,
+                        THREE_WAY_BOARDS,
+                    )[hero_idx]
+                },
+            )
         };
     }
 
@@ -975,5 +1095,57 @@ impl Rng {
 
     fn gen_f64(&mut self) -> f64 {
         (self.next_u64() as f64) / (u64::MAX as f64)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::equity_cache::combo_index;
+    use crate::solver::SolverInput;
+    use std::path::Path;
+    use std::sync::OnceLock;
+
+    fn test_cache() -> &'static EquityCache {
+        static CACHE: OnceLock<EquityCache> = OnceLock::new();
+        CACHE.get_or_init(|| {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("equity_cache.bin");
+            EquityCache::load(&path).expect("equity_cache.bin")
+        })
+    }
+
+    #[test]
+    fn bb_call_vs_both_aa_ev_beats_fold() {
+        let input = SolverInput {
+            stacks: vec![500.0, 1000.0, 5000.0],
+            payouts: vec![0.5, 0.3, 0.2],
+            small_blind: 50.0,
+            big_blind: 100.0,
+            ante: 0.0,
+            button_index: 0,
+            max_iterations: 1,
+            tolerance: 0.001,
+            num_players: 3,
+            verbose_convergence: false,
+        };
+        let ctx = ThreeMaxContext::new(&input, ThreeWayCache::new()).expect("ctx");
+        let ones = [1.0; HAND_TYPES];
+        let aa = combo_index([Card::new(14, 0), Card::new(14, 1)]) as usize;
+        let ev_call = ev_bb_call_vs_both(aa, &ones, &ones, &ctx, test_cache());
+        let ev_fold = ev_bb_fold_vs_both(aa, &ones, &ones, &ctx, test_cache());
+        println!(
+            "AA vs 100% ranges: call={ev_call:.4} fold={ev_fold:.4} diff={:.4}",
+            ev_call - ev_fold
+        );
+        println!(
+            "precomputed fold btn_win={} sb_win={}",
+            ctx.icm_hu_btn_sb_bb_fold_btn_win[ctx.bb], ctx.icm_hu_btn_sb_bb_fold_sb_win[ctx.bb]
+        );
+        assert!(
+            ev_call > ev_fold,
+            "AA should call 3-way: call {ev_call} fold {ev_fold}"
+        );
     }
 }

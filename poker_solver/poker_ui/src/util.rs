@@ -39,10 +39,20 @@ pub fn parse_hand(input: &str) -> Result<[Card; 2], String> {
     }
 
     if trimmed.len() == 4 {
-        let first = Card::from_str(&trimmed[0..2])
-            .map_err(|error| format!("не удалось разобрать карту '{}': {:?}", &trimmed[0..2], error))?;
-        let second = Card::from_str(&trimmed[2..4])
-            .map_err(|error| format!("не удалось разобрать карту '{}': {:?}", &trimmed[2..4], error))?;
+        let first = Card::from_str(&trimmed[0..2]).map_err(|error| {
+            format!(
+                "не удалось разобрать карту '{}': {:?}",
+                &trimmed[0..2],
+                error
+            )
+        })?;
+        let second = Card::from_str(&trimmed[2..4]).map_err(|error| {
+            format!(
+                "не удалось разобрать карту '{}': {:?}",
+                &trimmed[2..4],
+                error
+            )
+        })?;
         if first == second {
             return Err("рука содержит одинаковые карты".to_string());
         }

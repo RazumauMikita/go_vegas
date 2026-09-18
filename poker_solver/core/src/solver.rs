@@ -31,6 +31,8 @@ pub struct SolverInput {
     pub tolerance: f64,
     /// Число игроков (2 = HU, 3 = 3-max). Если 0 — берётся `stacks.len()`.
     pub num_players: usize,
+    /// Печать push_change / call_change по итерациям (3-max FP).
+    pub verbose_convergence: bool,
 }
 
 /// Диапазоны 3-max push/fold.
@@ -564,6 +566,7 @@ mod tests {
             max_iterations: 50,
             tolerance: 0.001,
             num_players: 2,
+            verbose_convergence: false,
         }
     }
 
@@ -643,6 +646,7 @@ mod tests {
             max_iterations: 50,
             tolerance: 0.001,
             num_players: 3,
+            verbose_convergence: false,
         }
     }
 
@@ -700,6 +704,50 @@ mod tests {
     }
 
     #[test]
+    fn three_max_with_cache_still_converges() {
+        let output = three_max_output();
+        assert!(output.converged, "3-max should converge");
+        assert!(
+            output.iterations_used < 50,
+            "expected < 50 iterations, got {}",
+            output.iterations_used
+        );
+
+        let ranges = three_max_ranges();
+        let expected = [
+            ("BTN push", range_combo_share(&ranges.btn_push), 26.0),
+            (
+                "SB call vs BTN",
+                range_combo_share(&ranges.sb_call_vs_btn),
+                6.9,
+            ),
+            (
+                "BB call vs BTN",
+                range_combo_share(&ranges.bb_call_vs_btn),
+                8.8,
+            ),
+            (
+                "BB call vs both",
+                range_combo_share(&ranges.bb_call_vs_btn_and_sb),
+                1.4,
+            ),
+            ("SB push", range_combo_share(&ranges.sb_push), 59.4),
+            (
+                "BB call vs SB",
+                range_combo_share(&ranges.bb_call_vs_sb),
+                23.4,
+            ),
+        ];
+        for (label, share, expected_pct) in expected {
+            let got_pct = share * 100.0;
+            assert!(
+                (got_pct - expected_pct).abs() <= 0.5,
+                "{label}: expected {expected_pct:.1}% ± 0.5, got {got_pct:.1}%"
+            );
+        }
+    }
+
+    #[test]
     fn hrc_ev_diagnostics() {
         let cache = test_cache();
         let ako = [Card::new(14, 0), Card::new(13, 1)];
@@ -717,6 +765,7 @@ mod tests {
             max_iterations: 50,
             tolerance: 0.001,
             num_players: 2,
+            verbose_convergence: false,
         };
         let ctx = HuContext::new(&input).expect("HU context");
 
