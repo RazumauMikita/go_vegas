@@ -4,8 +4,11 @@ use crate::card::Card;
 use crate::equity_cache::{expand_combo, hands_overlap, EquityCache};
 use crate::icm::icm_equity;
 
-const HAND_TYPES: usize = 169;
-const INDIFFERENT_EPS: f64 = 1e-9;
+pub(crate) const HAND_TYPES: usize = 169;
+pub(crate) const INDIFFERENT_EPS: f64 = 1e-9;
+
+#[path = "three_max.rs"]
+mod three_max;
 
 /// Входные данные для солвера.
 #[derive(Debug, Clone)]
@@ -26,6 +29,19 @@ pub struct SolverInput {
     pub max_iterations: usize,
     /// Критерий сходимости (изменение диапазонов < tolerance).
     pub tolerance: f64,
+    /// Число игроков (2 = HU, 3 = 3-max). Если 0 — берётся `stacks.len()`.
+    pub num_players: usize,
+}
+
+/// Диапазоны 3-max push/fold.
+#[derive(Debug, Clone)]
+pub struct ThreeMaxRanges {
+    pub btn_push: [f64; HAND_TYPES],
+    pub sb_call_vs_btn: [f64; HAND_TYPES],
+    pub bb_call_vs_btn: [f64; HAND_TYPES],
+    pub bb_call_vs_btn_and_sb: [f64; HAND_TYPES],
+    pub sb_push: [f64; HAND_TYPES],
+    pub bb_call_vs_sb: [f64; HAND_TYPES],
 }
 
 /// Выходные данные солвера.
@@ -41,13 +57,20 @@ pub struct SolverOutput {
     pub iterations_used: usize,
     /// Достигнута ли сходимость.
     pub converged: bool,
+    /// Диапазоны 3-max (если солвер запускался на трёх игроках).
+    pub three_max: Option<ThreeMaxRanges>,
 }
 
 /// Найти равновесие Нэша для push/fold.
 ///
-/// Сейчас реализован только HU: SB (баттон) пушит или фолдит, BB коллит или фолдит.
+/// HU (2 игрока) или 3-max (BTN/SB/BB).
 pub fn solve(input: &SolverInput, cache: &EquityCache) -> SolverOutput {
-    if input.stacks.len() != 2 {
+    let players = if input.num_players == 2 || input.num_players == 3 {
+        input.num_players
+    } else {
+        input.stacks.len()
+    };
+    if players != input.stacks.len() {
         return empty_output(input.stacks.len());
     }
     if input.button_index >= input.stacks.len() {
@@ -57,6 +80,14 @@ pub fn solve(input: &SolverInput, cache: &EquityCache) -> SolverOutput {
         return empty_output(input.stacks.len());
     }
 
+    match players {
+        2 => solve_hu(input, cache),
+        3 => three_max::solve_3max(input, cache),
+        _ => empty_output(input.stacks.len()),
+    }
+}
+
+fn solve_hu(input: &SolverInput, cache: &EquityCache) -> SolverOutput {
     let ctx = match HuContext::new(input) {
         Some(ctx) => ctx,
         None => return empty_output(input.stacks.len()),
@@ -121,16 +152,18 @@ pub fn solve(input: &SolverInput, cache: &EquityCache) -> SolverOutput {
         equities,
         iterations_used,
         converged,
+        three_max: None,
     }
 }
 
-fn empty_output(players: usize) -> SolverOutput {
+pub(crate) fn empty_output(players: usize) -> SolverOutput {
     SolverOutput {
         push_ranges: vec![[0.0; HAND_TYPES]; players],
         call_ranges: vec![[0.0; HAND_TYPES]; players],
         equities: vec![0.0; players],
         iterations_used: 0,
         converged: false,
+        three_max: None,
     }
 }
 
@@ -218,25 +251,53 @@ impl HuContext {
     }
 }
 
-fn tournament_equity(stacks: &[f64], payouts: &[f64]) -> Vec<f64> {
-    if stacks.len() != 2 {
-        return icm_equity(stacks, payouts);
+pub(crate) fn tournament_equity(stacks: &[f64], payouts: &[f64]) -> Vec<f64> {
+    let n = stacks.len();
+    if n == 0 {
+        return Vec::new();
     }
 
-    let first = payouts.first().copied().unwrap_or(1.0);
-    let second = payouts.get(1).copied().unwrap_or(0.0);
+    let alive: Vec<usize> = (0..n).filter(|&index| stacks[index] > 0.0).collect();
+    let busted: Vec<usize> = (0..n).filter(|&index| stacks[index] <= 0.0).collect();
+    let mut result = vec![0.0; n];
 
-    if stacks[0] <= 0.0 && stacks[1] <= 0.0 {
-        return vec![(first + second) / 2.0, (first + second) / 2.0];
-    }
-    if stacks[0] <= 0.0 {
-        return vec![second, first];
-    }
-    if stacks[1] <= 0.0 {
-        return vec![first, second];
+    if !busted.is_empty() {
+        let prize: f64 = (alive.len()..n)
+            .map(|place| payouts.get(place).copied().unwrap_or(0.0))
+            .sum();
+        let share = prize / busted.len() as f64;
+        for &index in &busted {
+            result[index] = share;
+        }
     }
 
-    icm_equity(stacks, payouts)
+    if alive.is_empty() {
+        return result;
+    }
+
+    let remaining: Vec<f64> = (0..alive.len())
+        .map(|place| payouts.get(place).copied().unwrap_or(0.0))
+        .collect();
+    let remaining_sum: f64 = remaining.iter().sum();
+    if remaining_sum <= 0.0 {
+        return result;
+    }
+
+    if alive.len() == 1 {
+        result[alive[0]] = remaining_sum;
+        return result;
+    }
+
+    let alive_stacks: Vec<f64> = alive.iter().map(|&index| stacks[index]).collect();
+    let normalized: Vec<f64> = remaining
+        .iter()
+        .map(|payout| payout / remaining_sum)
+        .collect();
+    let icm = icm_equity(&alive_stacks, &normalized);
+    for (offset, &index) in alive.iter().enumerate() {
+        result[index] = icm[offset] * remaining_sum;
+    }
+    result
 }
 
 fn normalize_payouts(payouts: &[f64]) -> Vec<f64> {
@@ -250,7 +311,7 @@ fn normalize_payouts(payouts: &[f64]) -> Vec<f64> {
         .collect()
 }
 
-fn transfer(stacks: &[f64], from: usize, to: usize, amount: f64) -> Vec<f64> {
+pub(crate) fn transfer(stacks: &[f64], from: usize, to: usize, amount: f64) -> Vec<f64> {
     let amount = amount.max(0.0).min(stacks[from]);
     let mut next = stacks.to_vec();
     next[from] -= amount;
@@ -263,7 +324,7 @@ fn showdown_stacks(stacks: &[f64], winner: usize, loser: usize) -> Vec<f64> {
     transfer(stacks, loser, winner, contested)
 }
 
-fn build_unblocked(combos: &[Vec<[Card; 2]>]) -> Vec<Vec<[u8; HAND_TYPES]>> {
+pub(crate) fn build_unblocked(combos: &[Vec<[Card; 2]>]) -> Vec<Vec<[u8; HAND_TYPES]>> {
     combos
         .iter()
         .map(|hero_combos| {
@@ -284,7 +345,7 @@ fn build_unblocked(combos: &[Vec<[Card; 2]>]) -> Vec<Vec<[u8; HAND_TYPES]>> {
         .collect()
 }
 
-fn best_response(ev_action: f64, ev_fold: f64, current: f64) -> f64 {
+pub(crate) fn best_response(ev_action: f64, ev_fold: f64, current: f64) -> f64 {
     let diff = ev_action - ev_fold;
     if diff > INDIFFERENT_EPS {
         1.0
@@ -473,6 +534,7 @@ mod tests {
             button_index: 0,
             max_iterations: 50,
             tolerance: 0.001,
+            num_players: 2,
         }
     }
 
@@ -541,6 +603,73 @@ mod tests {
         );
     }
 
+    fn three_max_input() -> SolverInput {
+        SolverInput {
+            stacks: vec![1000.0, 1000.0, 1000.0],
+            payouts: vec![0.5, 0.3, 0.2],
+            small_blind: 50.0,
+            big_blind: 100.0,
+            ante: 0.0,
+            button_index: 0,
+            max_iterations: 50,
+            tolerance: 0.001,
+            num_players: 3,
+        }
+    }
+
+    fn three_max_output() -> &'static SolverOutput {
+        static OUTPUT: std::sync::OnceLock<SolverOutput> = std::sync::OnceLock::new();
+        OUTPUT.get_or_init(|| solve(&three_max_input(), test_cache()))
+    }
+
+    fn three_max_ranges() -> &'static ThreeMaxRanges {
+        three_max_output().three_max.as_ref().expect("3-max ranges")
+    }
+
+    #[test]
+    fn three_max_converges() {
+        let output = three_max_output();
+        assert!(output.converged, "3-max should converge");
+        assert!(
+            output.iterations_used < 100,
+            "expected < 100 iterations, got {}",
+            output.iterations_used
+        );
+    }
+
+    #[test]
+    fn btn_pushes_wider_than_sb() {
+        let ranges = three_max_ranges();
+        let btn = range_combo_share(&ranges.btn_push);
+        let sb_call = range_combo_share(&ranges.sb_call_vs_btn);
+        assert!(
+            btn > sb_call,
+            "BTN push {btn:.3} should be wider than SB call vs BTN {sb_call:.3}"
+        );
+    }
+
+    #[test]
+    fn bb_calls_tighter_after_sb_call() {
+        let ranges = three_max_ranges();
+        let vs_both = range_combo_share(&ranges.bb_call_vs_btn_and_sb);
+        let vs_btn = range_combo_share(&ranges.bb_call_vs_btn);
+        assert!(
+            vs_both < vs_btn,
+            "BB vs BTN+SB {vs_both:.3} should be tighter than BB vs BTN {vs_btn:.3}"
+        );
+    }
+
+    #[test]
+    fn bb_calls_wider_vs_sb_than_vs_btn() {
+        let ranges = three_max_ranges();
+        let vs_sb = range_combo_share(&ranges.bb_call_vs_sb);
+        let vs_btn = range_combo_share(&ranges.bb_call_vs_btn);
+        assert!(
+            vs_sb > vs_btn,
+            "BB vs SB {vs_sb:.3} should be wider than BB vs BTN {vs_btn:.3}"
+        );
+    }
+
     #[test]
     fn hrc_ev_diagnostics() {
         let cache = test_cache();
@@ -558,6 +687,7 @@ mod tests {
             button_index: 0,
             max_iterations: 50,
             tolerance: 0.001,
+            num_players: 2,
         };
         let ctx = HuContext::new(&input).expect("HU context");
 

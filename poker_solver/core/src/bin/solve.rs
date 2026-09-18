@@ -4,6 +4,7 @@ use std::process::ExitCode;
 
 use poker_core::{
     combo_index, combo_label, index_to_ranks, Card, EquityCache, SolverInput, SolverOutput,
+    ThreeMaxRanges,
 };
 
 fn main() -> ExitCode {
@@ -40,6 +41,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
         button_index: config.button_index,
         max_iterations: config.max_iterations,
         tolerance: config.tolerance,
+        num_players: config.num_players,
     };
 
     let output = poker_core::solve(&input, &cache);
@@ -57,6 +59,7 @@ struct Config {
     button_index: usize,
     max_iterations: usize,
     tolerance: f64,
+    num_players: usize,
     cache: PathBuf,
 }
 
@@ -146,8 +149,8 @@ fn parse_args(args: Vec<String>) -> Result<Config, String> {
     let payouts = payouts.ok_or_else(|| "missing --payouts".to_string())?;
     let blinds = blinds.ok_or_else(|| "missing --blinds".to_string())?;
 
-    if stacks.len() != 2 {
-        return Err("HU solver requires exactly two stacks".to_string());
+    if stacks.len() != 2 && stacks.len() != 3 {
+        return Err("solver requires 2 or 3 stacks".to_string());
     }
     if blinds.len() != 2 {
         return Err("--blinds requires SB,BB".to_string());
@@ -163,6 +166,7 @@ fn parse_args(args: Vec<String>) -> Result<Config, String> {
     }
 
     Ok(Config {
+        num_players: stacks.len(),
         stacks,
         payouts,
         small_blind: blinds[0],
@@ -194,6 +198,16 @@ fn parse_number_list(input: &str, label: &str) -> Result<Vec<f64>, String> {
 }
 
 fn print_output(input: &SolverInput, output: &SolverOutput) {
+    if input.stacks.len() == 3 {
+        if let Some(ranges) = output.three_max.as_ref() {
+            print_output_3max(input, output, ranges);
+            return;
+        }
+    }
+    print_output_hu(input, output);
+}
+
+fn print_output_hu(input: &SolverInput, output: &SolverOutput) {
     let sb = input.button_index;
     let bb = 1 - sb;
 
@@ -227,6 +241,59 @@ fn print_output(input: &SolverInput, output: &SolverOutput) {
     println!();
     println!("BB call 13x13 (A..2, suited above diagonal, offsuit below):");
     print_matrix(&output.call_ranges[bb]);
+}
+
+fn print_output_3max(input: &SolverInput, output: &SolverOutput, ranges: &ThreeMaxRanges) {
+    let btn = input.button_index;
+    let sb = (btn + 1) % 3;
+    let bb = (btn + 2) % 3;
+
+    println!("Players: 3");
+    println!(
+        "Stacks:  BTN={} SB={} BB={}",
+        input.stacks[btn], input.stacks[sb], input.stacks[bb]
+    );
+    println!(
+        "Blinds:  {}/{} ante={}",
+        input.small_blind, input.big_blind, input.ante
+    );
+    println!(
+        "Iterations: {}  converged={}",
+        output.iterations_used, output.converged
+    );
+    println!();
+    println!("BTN $EV: {:.2}%", output.equities[btn] * 100.0);
+    println!("SB $EV:  {:.2}%", output.equities[sb] * 100.0);
+    println!("BB $EV:  {:.2}%", output.equities[bb] * 100.0);
+    println!();
+    print_range_share("BTN push", &ranges.btn_push);
+    print_range_share("SB call vs BTN push", &ranges.sb_call_vs_btn);
+    print_range_share("BB call vs BTN push (SB fold)", &ranges.bb_call_vs_btn);
+    print_range_share(
+        "BB call vs BTN push (SB call)",
+        &ranges.bb_call_vs_btn_and_sb,
+    );
+    print_range_share("SB push (BTN fold)", &ranges.sb_push);
+    print_range_share("BB call vs SB push", &ranges.bb_call_vs_sb);
+    println!();
+
+    println!("BTN push 13x13 (A..2, suited above diagonal, offsuit below):");
+    print_matrix(&ranges.btn_push);
+    println!();
+    println!("SB call vs BTN 13x13:");
+    print_matrix(&ranges.sb_call_vs_btn);
+    println!();
+    println!("BB call vs BTN (SB fold) 13x13:");
+    print_matrix(&ranges.bb_call_vs_btn);
+    println!();
+    println!("BB call vs BTN+SB 13x13:");
+    print_matrix(&ranges.bb_call_vs_btn_and_sb);
+    println!();
+    println!("SB push (BTN fold) 13x13:");
+    print_matrix(&ranges.sb_push);
+    println!();
+    println!("BB call vs SB 13x13:");
+    print_matrix(&ranges.bb_call_vs_sb);
 }
 
 fn print_range_share(label: &str, range: &[f64; 169]) {
@@ -300,6 +367,7 @@ fn print_usage() {
     eprintln!(
         "usage:
   solve --stacks 1000,1000 --payouts 0.5,0.3 --blinds 50,100 --cache equity_cache.bin
+  solve --stacks 1000,1000,1000 --payouts 0.5,0.3,0.2 --blinds 50,100 --cache equity_cache.bin
 
 Options:
   --ante N
