@@ -16,7 +16,7 @@ use crate::solver::{empty_output, SolverInput, SolverOutput, HAND_TYPES};
 const DEFAULT_TOLERANCE: f64 = 0.005;
 const DCFR_ALPHA: f64 = 1.5;
 const DCFR_BETA: f64 = 0.5;
-const DCFR_GAMMA: f64 = 2.0;
+const DCFR_GAMMA: f64 = 1.0;
 
 pub struct Cfr3Max<'a> {
     input: SolverInput,
