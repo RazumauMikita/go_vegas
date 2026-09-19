@@ -14,6 +14,7 @@ use crate::solver::three_max::{
 use crate::solver::{empty_output, SolverInput, SolverOutput, HAND_TYPES};
 
 const DEFAULT_TOLERANCE: f64 = 0.005;
+const MIN_CONVERGENCE_ITERS: usize = 200;
 const DCFR_ALPHA: f64 = 1.5;
 const DCFR_BETA: f64 = 0.5;
 const DCFR_GAMMA: f64 = 1.0;
@@ -280,7 +281,7 @@ impl SolverAlgorithm for Cfr3Max<'_> {
         let tolerance = self.tolerance();
         let last_mean = last_change / n;
         let avg_mean = avg_change / n;
-        if self.iterations_done >= 30
+        if self.iterations_done >= MIN_CONVERGENCE_ITERS
             && (last_change < tolerance
                 || last_mean < tolerance
                 || avg_change < tolerance

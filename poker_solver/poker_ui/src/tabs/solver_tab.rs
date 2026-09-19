@@ -58,7 +58,7 @@ impl Default for SolverTab {
             small_blind: "50".to_string(),
             big_blind: "100".to_string(),
             ante: "0".to_string(),
-            max_iterations: "100".to_string(),
+            max_iterations: "200".to_string(),
             tolerance: "0.001".to_string(),
             algorithm: Algorithm::FictitiousPlay,
             equity_cache: EquityCache::from_bytes(CACHE_BYTES).expect("embedded cache corrupted"),
@@ -688,7 +688,7 @@ mod tests {
         assert_eq!(input.payouts, vec![0.5, 0.3, 0.2]);
         assert_eq!(input.small_blind, 50.0);
         assert_eq!(input.big_blind, 100.0);
-        assert_eq!(input.max_iterations, 100);
+        assert_eq!(input.max_iterations, 200);
         assert!((input.tolerance - 0.001).abs() < 1e-12);
         assert_eq!(input.algorithm, Algorithm::FictitiousPlay);
     }

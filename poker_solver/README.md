@@ -221,3 +221,11 @@ cargo clippy --all-targets
 cargo fmt --check
 ```
 
+### 3-way rank cache
+
+Офлайн-сборка полного кэша 3-way rank-distribution (`169³` троек типов рук). Solve потом только читает файл — без ленивого прогрева и без просадок при смене стеков. `--samples` — число MC-бордов на валидную тройку (больше = точнее и дольше; 100 ≈ 5–10 мин, 500 заметно дольше). Результат: `three_way_rank_cache.bin` (~28 MB) в текущей директории.
+
+```bash
+cargo run --release --bin build_rank_cache -- \
+  --output three_way_rank_cache.bin --samples 500
+```
