@@ -4,35 +4,28 @@ use std::time::Instant;
 use rayon::prelude::*;
 
 use crate::card::Card;
-use crate::equity_3way::equity_3way_icm_with_cache;
+use crate::equity_3way::{permutation_showdown_icm, rank_distribution_3way};
 use crate::equity_cache::{combo_index, expand_combo, EquityCache};
 use crate::icm::{icm_equity_call_count, reset_icm_equity_call_count, IcmCache};
 use crate::solver::{
     best_response, build_unblocked, empty_output, tournament_equity, transfer, SolverInput,
     SolverOutput, ThreeMaxHandEvs, ThreeMaxRanges, HAND_EV_SCALE, HAND_TYPES,
 };
-use crate::three_way_cache::ThreeWayCache;
+use crate::three_way_rank_cache::ThreeWayRankCache;
 
 const THREE_WAY_SAMPLES: u32 = 64;
 const THREE_WAY_BOARDS: u64 = 100;
-const THREE_WAY_CACHE_FILE: &str = "equity_3way_cache.bin";
+const THREE_WAY_CACHE_FILE: &str = "three_way_rank_cache.bin";
 
-pub(crate) fn load_three_way_cache(input: &SolverInput) -> ThreeWayCache {
-    let path = Path::new(THREE_WAY_CACHE_FILE);
-    let stacks_equal = input.stacks.len() == 3
-        && input.stacks[0] == input.stacks[1]
-        && input.stacks[1] == input.stacks[2];
-    if stacks_equal {
-        ThreeWayCache::load(path).unwrap_or_else(|_| ThreeWayCache::new())
-    } else {
-        ThreeWayCache::new()
-    }
+pub(crate) fn load_three_way_cache() -> ThreeWayRankCache {
+    ThreeWayRankCache::load(Path::new(THREE_WAY_CACHE_FILE))
+        .unwrap_or_else(|_| ThreeWayRankCache::new())
 }
 
 pub(crate) fn persist_three_way_cache(ctx: &ThreeMaxContext) {
-    if ctx.cache_misses() > 0 && ctx.stacks_equal {
+    if ctx.cache_misses() > 0 {
         if let Err(error) = ctx.three_way.save(Path::new(THREE_WAY_CACHE_FILE)) {
-            eprintln!("failed to save 3-way cache: {error}");
+            eprintln!("failed to save 3-way rank cache: {error}");
         }
     }
 }
@@ -61,7 +54,7 @@ pub(crate) fn print_cache_stats(ctx: &ThreeMaxContext, solve_started: Instant) {
 
 pub(crate) fn solve_3max(input: &SolverInput, cache: &EquityCache) -> SolverOutput {
     let solve_started = Instant::now();
-    let three_way = load_three_way_cache(input);
+    let three_way = load_three_way_cache();
     let Some(ctx) = ThreeMaxContext::new(input, three_way) else {
         return empty_output(input.stacks.len());
     };
@@ -402,15 +395,14 @@ pub(crate) struct ThreeMaxContext {
     icm_hu_sb_bb_btn_fold_bb_win: Vec<f64>,
     all_in_stacks: [f64; 3],
     three_way_uncalled: [f64; 3],
-    stacks_equal: bool,
-    three_way: ThreeWayCache,
+    perm_icm: [[f64; 3]; 6],
+    three_way: ThreeWayRankCache,
     icm_cache: IcmCache,
-    use_icm_cache: bool,
     pub(crate) parallel_hands: bool,
 }
 
 impl ThreeMaxContext {
-    pub(crate) fn new(input: &SolverInput, three_way: ThreeWayCache) -> Option<Self> {
+    pub(crate) fn new(input: &SolverInput, three_way: ThreeWayRankCache) -> Option<Self> {
         if input.stacks.len() != 3 {
             return None;
         }
@@ -463,7 +455,6 @@ impl ThreeMaxContext {
             tournament_equity(&hu_with_dead(stacks, btn, btn_dead, sb, bb, bb), &payouts);
 
         let (all_in_stacks, three_way_uncalled) = three_way_effective_stacks(stacks, btn, sb, bb);
-        let stacks_equal = stacks[btn] == stacks[sb] && stacks[sb] == stacks[bb];
         let use_icm_cache = std::env::var_os("POKER_NO_ICM_CACHE").is_none();
         let parallel_hands = std::env::var_os("POKER_3MAX_SEQUENTIAL").is_none();
         let mut icm_cache = IcmCache::new();
@@ -475,6 +466,12 @@ impl ThreeMaxContext {
                 &payouts,
             );
         }
+        let perm_icm = permutation_showdown_icm(
+            all_in_stacks,
+            three_way_uncalled,
+            &payouts,
+            use_icm_cache.then_some(&icm_cache),
+        );
 
         Some(Self {
             btn,
@@ -494,16 +491,11 @@ impl ThreeMaxContext {
             icm_hu_sb_bb_btn_fold_bb_win,
             all_in_stacks,
             three_way_uncalled,
-            stacks_equal,
+            perm_icm,
             three_way,
             icm_cache,
-            use_icm_cache,
             parallel_hands,
         })
-    }
-
-    fn icm_cache_ref(&self) -> Option<&IcmCache> {
-        self.use_icm_cache.then_some(&self.icm_cache)
     }
 
     fn map_range_jobs<F>(&self, f: F) -> [Vec<f64>; 6]
@@ -1147,24 +1139,17 @@ fn three_way_ev(
         } else {
             (hand_a, hand_b, hero, 2)
         };
-        ev += ctx.three_way.get_or_compute(
+        let ranks_prob = ctx.three_way.get_or_compute(
             combo_index(btn_h),
             combo_index(sb_h),
             combo_index(bb_h),
-            hero_idx,
-            || {
-                equity_3way_icm_with_cache(
-                    btn_h,
-                    sb_h,
-                    bb_h,
-                    ctx.all_in_stacks,
-                    ctx.three_way_uncalled,
-                    &ctx.payouts,
-                    THREE_WAY_BOARDS,
-                    ctx.icm_cache_ref(),
-                )
-            },
+            || rank_distribution_3way(btn_h, sb_h, bb_h, THREE_WAY_BOARDS),
         );
+        let mut sample = 0.0;
+        for perm in 0..6 {
+            sample += ranks_prob[perm] * ctx.perm_icm[perm][hero_idx];
+        }
+        ev += sample;
     }
 
     if both_ok > 0.0 {
@@ -1275,7 +1260,7 @@ pub(crate) fn debug_bb_report(
         .find(|&idx| combo_label(idx as u8).eq_ignore_ascii_case(hand_label))
         .ok_or_else(|| format!("unknown hand label: {hand_label}"))?;
 
-    let ctx = ThreeMaxContext::new(input, ThreeWayCache::new())
+    let ctx = ThreeMaxContext::new(input, ThreeWayRankCache::new())
         .ok_or_else(|| "failed to build ThreeMaxContext".to_string())?;
 
     let btn_push = top_combo_range(cache, btn_combo_share);
@@ -1817,7 +1802,7 @@ mod tests {
             profile: false,
             algorithm: crate::solver::Algorithm::FictitiousPlay,
         };
-        let ctx = ThreeMaxContext::new(&input, ThreeWayCache::new()).expect("ctx");
+        let ctx = ThreeMaxContext::new(&input, ThreeWayRankCache::new()).expect("ctx");
         assert_eq!(ctx.all_in_stacks, [900.0, 500.0, 900.0]);
         assert_eq!(ctx.three_way_uncalled, [1100.0, 0.0, 0.0]);
     }
@@ -1838,7 +1823,7 @@ mod tests {
             profile: false,
             algorithm: crate::solver::Algorithm::FictitiousPlay,
         };
-        let ctx = ThreeMaxContext::new(&input, ThreeWayCache::new()).expect("ctx");
+        let ctx = ThreeMaxContext::new(&input, ThreeWayRankCache::new()).expect("ctx");
         let ones = [1.0; HAND_TYPES];
         let aa = combo_index([Card::new(14, 0), Card::new(14, 1)]) as usize;
         let ev_call = ev_bb_call_vs_both(aa, &ones, &ones, &ctx, test_cache());

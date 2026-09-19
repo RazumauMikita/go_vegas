@@ -45,7 +45,7 @@ pub struct Cfr3Max<'a> {
 
 impl<'a> Cfr3Max<'a> {
     pub fn init(input: &SolverInput, cache: &'a EquityCache) -> Option<Self> {
-        let ctx = ThreeMaxContext::new(input, load_three_way_cache(input))?;
+        let ctx = ThreeMaxContext::new(input, load_three_way_cache())?;
         Some(Self {
             input: input.clone(),
             cache,

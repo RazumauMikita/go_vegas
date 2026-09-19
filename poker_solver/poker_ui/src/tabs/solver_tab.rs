@@ -38,6 +38,7 @@ pub struct SolverTab {
     ante: String,
     max_iterations: String,
     tolerance: String,
+    algorithm: Algorithm,
     equity_cache: EquityCache,
     matrix_modes: HashMap<String, MatrixMode>,
     error: Option<String>,
@@ -59,6 +60,7 @@ impl Default for SolverTab {
             ante: "0".to_string(),
             max_iterations: "100".to_string(),
             tolerance: "0.001".to_string(),
+            algorithm: Algorithm::FictitiousPlay,
             equity_cache: EquityCache::from_bytes(CACHE_BYTES).expect("embedded cache corrupted"),
             matrix_modes: HashMap::new(),
             error: None,
@@ -276,6 +278,35 @@ impl SolverTab {
             compact_param_field(ui, "Tol:", &mut self.tolerance, 80.0);
         });
 
+        ui.horizontal(|ui| {
+            ui.label("Algorithm:");
+            egui::ComboBox::from_id_salt("solver_algorithm")
+                .selected_text(algorithm_label(self.algorithm))
+                .width(220.0)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut self.algorithm,
+                        Algorithm::FictitiousPlay,
+                        algorithm_label(Algorithm::FictitiousPlay),
+                    );
+                    ui.selectable_value(
+                        &mut self.algorithm,
+                        Algorithm::Cfr,
+                        algorithm_label(Algorithm::Cfr),
+                    );
+                    ui.selectable_value(
+                        &mut self.algorithm,
+                        Algorithm::Cfr3Max,
+                        algorithm_label(Algorithm::Cfr3Max),
+                    );
+                });
+        });
+        ui.label(
+            RichText::new("FP: быстро, ±2%. CFR: 30 итераций, ±1% (HU) / ±1.5% (3-max).")
+                .small()
+                .weak(),
+        );
+
         if let Some(pool_size) = self.parse_prize_sum() {
             if pool_size > 1.0 + 1e-6 {
                 ui.colored_label(
@@ -319,10 +350,11 @@ impl SolverTab {
     fn draw_result_panels(&mut self, ui: &mut Ui, result: &SolverResult) {
         ui.label(
             RichText::new(format!(
-                "Время: {} | Итерации: {} | converged={}",
+                "Время: {} | Итерации: {} | converged={} | algorithm={}",
                 format_duration(result.duration),
                 result.output.iterations_used,
-                result.output.converged
+                result.output.converged,
+                result.input.algorithm.as_str()
             ))
             .small(),
         );
@@ -504,7 +536,7 @@ impl SolverTab {
             num_players: self.player_count,
             verbose_convergence: false,
             profile: false,
-            algorithm: Algorithm::FictitiousPlay,
+            algorithm: resolve_algorithm(self.algorithm, self.player_count),
         })
     }
 
@@ -562,6 +594,23 @@ impl SolverTab {
 }
 
 const PARAM_FIELD_WIDTH: f32 = 70.0;
+
+fn algorithm_label(algorithm: Algorithm) -> &'static str {
+    match algorithm {
+        Algorithm::FictitiousPlay => "Fictitious Play (fast)",
+        Algorithm::Cfr => "CFR HU",
+        Algorithm::Cfr3Max => "CFR 3-max",
+    }
+}
+
+fn resolve_algorithm(selected: Algorithm, player_count: usize) -> Algorithm {
+    match (selected, player_count) {
+        (Algorithm::FictitiousPlay, _) => Algorithm::FictitiousPlay,
+        (Algorithm::Cfr, 3) => Algorithm::Cfr3Max,
+        (Algorithm::Cfr3Max, 2) => Algorithm::Cfr,
+        (algorithm, _) => algorithm,
+    }
+}
 
 fn format_stack(value: f64) -> String {
     if (value - value.round()).abs() < 1e-9 {
@@ -640,6 +689,23 @@ mod tests {
         assert_eq!(input.big_blind, 100.0);
         assert_eq!(input.max_iterations, 100);
         assert!((input.tolerance - 0.001).abs() < 1e-12);
+        assert_eq!(input.algorithm, Algorithm::FictitiousPlay);
+    }
+
+    #[test]
+    fn resolve_algorithm_maps_by_player_count() {
+        assert_eq!(
+            resolve_algorithm(Algorithm::Cfr3Max, 2),
+            Algorithm::Cfr
+        );
+        assert_eq!(
+            resolve_algorithm(Algorithm::Cfr, 3),
+            Algorithm::Cfr3Max
+        );
+        assert_eq!(
+            resolve_algorithm(Algorithm::Cfr3Max, 3),
+            Algorithm::Cfr3Max
+        );
     }
 
     #[test]

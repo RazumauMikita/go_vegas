@@ -1,8 +1,20 @@
+use std::sync::OnceLock;
+
 use crate::card::Card;
 use crate::hand_evaluator::{evaluate_hand, HandRank};
 use crate::icm::{icm_equity, IcmCache};
 
 const DECK_AFTER_SIX: usize = 46;
+
+/// Перестановки рангов (лучшая → худшая): индекс игрока 0=BTN, 1=SB, 2=BB.
+pub const RANK_PERMUTATIONS: [[usize; 3]; 6] = [
+    [0, 1, 2],
+    [0, 2, 1],
+    [1, 0, 2],
+    [1, 2, 0],
+    [2, 0, 1],
+    [2, 1, 0],
+];
 
 /// Chip-share игрока `hand1` в 3-way all-in: P(выигрыш) + 0.5·P(тай на двоих) + 1/3·P(тай на троих).
 pub fn equity_3way(hand1: [Card; 2], hand2: [Card; 2], hand3: [Card; 2], iterations: u64) -> f64 {
@@ -165,6 +177,124 @@ pub fn finalize_3way_stacks(
         stacks[i] += uncalled[i];
     }
     stacks
+}
+
+/// Финальные стеки для одной из 6 строгих перестановок рангов.
+/// `uncalled` всегда возвращается владельцу (overbet), независимо от ранга.
+pub fn apply_permutation(perm: usize, contested: [f64; 3], uncalled: [f64; 3]) -> [f64; 3] {
+    debug_assert!(perm < 6);
+    finalize_3way_stacks(contested, uncalled, permutation_ranks(perm.min(5)))
+}
+
+/// Вероятности 6 перестановок рангов (MC по бордам). Ничьи делятся поровну
+/// между совместимыми перестановками — в фишках это split pot.
+pub fn rank_distribution_3way(
+    hand1: [Card; 2],
+    hand2: [Card; 2],
+    hand3: [Card; 2],
+    iterations: u64,
+) -> [f64; 6] {
+    if iterations == 0 {
+        return [1.0 / 6.0; 6];
+    }
+
+    let dead = [hand1[0], hand1[1], hand2[0], hand2[1], hand3[0], hand3[1]];
+    if has_duplicate(&dead) {
+        return [1.0 / 6.0; 6];
+    }
+
+    let available = available_cards(dead);
+    let mut rng = Rng::new(0xB7E1_31D1_9A8F_5C03 ^ hash_six(dead));
+    let mut indices = [0_u8; DECK_AFTER_SIX];
+    for (slot, index) in indices.iter_mut().enumerate() {
+        *index = slot as u8;
+    }
+
+    let mut counts = [0.0; 6];
+    for _ in 0..iterations {
+        let board = sample_board(&available, &mut indices, &mut rng);
+        let ranks = [
+            evaluate_seven(hand1, board),
+            evaluate_seven(hand2, board),
+            evaluate_seven(hand3, board),
+        ];
+        let weights = rank_permutation_weights(ranks);
+        for i in 0..6 {
+            counts[i] += weights[i];
+        }
+    }
+
+    let total = iterations as f64;
+    counts.map(|count| count / total)
+}
+
+/// ICM всех трёх игроков для каждой из 6 перестановок (считается один раз на стеки).
+pub(crate) fn permutation_showdown_icm(
+    contested: [f64; 3],
+    uncalled: [f64; 3],
+    payouts: &[f64],
+    icm_cache: Option<&IcmCache>,
+) -> [[f64; 3]; 6] {
+    let pre_showdown = [
+        contested[0] + uncalled[0],
+        contested[1] + uncalled[1],
+        contested[2] + uncalled[2],
+    ];
+    let mut table = [[0.0; 3]; 6];
+    for perm in 0..6 {
+        let new_stacks = apply_permutation(perm, contested, uncalled);
+        table[perm] = icm_after_showdown_with_cache(
+            new_stacks,
+            pre_showdown,
+            permutation_ranks(perm),
+            payouts,
+            icm_cache,
+        );
+    }
+    table
+}
+
+pub(crate) fn rank_permutation_weights(ranks: [HandRank; 3]) -> [f64; 6] {
+    let mut ok = [false; 6];
+    let mut valid = 0.0;
+    for (i, order) in RANK_PERMUTATIONS.iter().enumerate() {
+        if ranks[order[0]] >= ranks[order[1]] && ranks[order[1]] >= ranks[order[2]] {
+            ok[i] = true;
+            valid += 1.0;
+        }
+    }
+    if valid == 0.0 {
+        return [1.0 / 6.0; 6];
+    }
+    let share = 1.0 / valid;
+    let mut out = [0.0; 6];
+    for i in 0..6 {
+        if ok[i] {
+            out[i] = share;
+        }
+    }
+    out
+}
+
+fn permutation_ranks(perm: usize) -> [HandRank; 3] {
+    let [hi, mid, lo] = rank_palette();
+    let [best, middle, worst] = RANK_PERMUTATIONS[perm];
+    let mut ranks = [lo; 3];
+    ranks[best] = hi;
+    ranks[middle] = mid;
+    ranks[worst] = lo;
+    ranks
+}
+
+fn rank_palette() -> [HandRank; 3] {
+    static RANKS: OnceLock<[HandRank; 3]> = OnceLock::new();
+    *RANKS.get_or_init(|| {
+        [
+            dummy_rank(["Ah", "Ad", "Ac", "As", "Kh", "2c", "3d"]),
+            dummy_rank(["Kh", "Kd", "Kc", "Qh", "Qd", "2s", "3s"]),
+            dummy_rank(["9h", "8d", "7c", "5s", "4h", "3c", "2d"]),
+        ]
+    })
 }
 
 /// $EV трёх игроков после 3-way all-in: side pots, затем ICM оставшихся стеков.
@@ -627,5 +757,160 @@ mod tests {
             800,
         );
         assert!(as_bb[0] > 0.45, "AA as BB 3-way EV {}", as_bb[0]);
+    }
+
+    #[test]
+    fn apply_permutation_equal_stacks() {
+        let contested = [500.0, 500.0, 500.0];
+        let uncalled = [0.0, 0.0, 0.0];
+        assert_stacks(
+            apply_permutation(0, contested, uncalled),
+            [1500.0, 0.0, 0.0],
+        );
+        assert_stacks(
+            apply_permutation(1, contested, uncalled),
+            [1500.0, 0.0, 0.0],
+        );
+        assert_stacks(
+            apply_permutation(2, contested, uncalled),
+            [0.0, 1500.0, 0.0],
+        );
+        assert_stacks(
+            apply_permutation(3, contested, uncalled),
+            [0.0, 1500.0, 0.0],
+        );
+        assert_stacks(
+            apply_permutation(4, contested, uncalled),
+            [0.0, 0.0, 1500.0],
+        );
+        assert_stacks(
+            apply_permutation(5, contested, uncalled),
+            [0.0, 0.0, 1500.0],
+        );
+    }
+
+    #[test]
+    fn apply_permutation_side_pot() {
+        let uncalled = [0.0, 0.0, 0.0];
+        assert_stacks(
+            apply_permutation(0, [500.0, 1000.0, 1000.0], uncalled),
+            [1500.0, 1000.0, 0.0],
+        );
+        assert_stacks(
+            apply_permutation(3, [1000.0, 500.0, 1000.0], uncalled),
+            [0.0, 1500.0, 1000.0],
+        );
+        assert_stacks(
+            apply_permutation(4, [1000.0, 1000.0, 500.0], uncalled),
+            [1000.0, 0.0, 1500.0],
+        );
+    }
+
+    #[test]
+    fn apply_permutation_uncalled_btn() {
+        let contested = [900.0, 500.0, 900.0];
+        let uncalled = [1100.0, 0.0, 0.0];
+        let p1 = apply_permutation(0, contested, uncalled);
+        let full = apply_permutation(0, [2000.0, 500.0, 900.0], [0.0, 0.0, 0.0]);
+        assert_stacks(p1, full);
+        assert!(p1[0] >= 1100.0, "BTN keeps uncalled, stacks {p1:?}");
+        for perm in 0..6 {
+            let stacks = apply_permutation(perm, contested, uncalled);
+            assert!(
+                (stacks[0] + stacks[1] + stacks[2] - 3400.0).abs() < 1e-9,
+                "perm {perm} chips {stacks:?}"
+            );
+            assert!(
+                (stacks[0] - 1100.0).abs() < 1e-9 || stacks[0] > 1100.0,
+                "perm {perm} BTN must keep uncalled: {stacks:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rank_permutation_weights_strict_and_ties() {
+        let hi = btn_wins();
+        let mid = sb_mid();
+        let lo = bb_lose();
+        let strict = rank_permutation_weights([hi, mid, lo]);
+        assert!((strict[0] - 1.0).abs() < 1e-12);
+        assert!(strict[1..].iter().all(|&p| p.abs() < 1e-12));
+
+        let tie_first = rank_permutation_weights([hi, hi, lo]);
+        assert!((tie_first[0] - 0.5).abs() < 1e-12);
+        assert!((tie_first[2] - 0.5).abs() < 1e-12);
+
+        let all_tie = rank_permutation_weights([hi, hi, hi]);
+        for p in all_tie {
+            assert!((p - 1.0 / 6.0).abs() < 1e-12, "all-tie {all_tie:?}");
+        }
+    }
+
+    #[test]
+    fn rank_cache_sums_to_one() {
+        let dist =
+            rank_distribution_3way(hand("Ah", "Ad"), hand("Kh", "Kd"), hand("Qh", "Qd"), 1_000);
+        let sum: f64 = dist.iter().sum();
+        assert!((sum - 1.0).abs() < 0.01, "sum {sum}, dist {dist:?}");
+    }
+
+    #[test]
+    fn rank_cache_symmetric() {
+        let dist =
+            rank_distribution_3way(hand("7h", "2d"), hand("7c", "2s"), hand("7s", "2c"), 2_000);
+        for (i, &p) in dist.iter().enumerate() {
+            assert!(
+                (p - 1.0 / 6.0).abs() < 0.04,
+                "perm {i} = {p}, dist {dist:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn apply_permutation_matches_resolve() {
+        let contested = [500.0, 1000.0, 5000.0];
+        let uncalled = [0.0, 0.0, 0.0];
+        let expected = resolve_3way_showdown(contested, [btn_wins(), sb_mid(), bb_lose()]);
+        assert_stacks(apply_permutation(0, contested, uncalled), expected);
+    }
+
+    #[test]
+    fn universal_across_stacks() {
+        use crate::three_way_rank_cache::ThreeWayRankCache;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Instant;
+
+        let cache = ThreeWayRankCache::new();
+        let calls = AtomicUsize::new(0);
+        let aa = hand("Ah", "Ad");
+        let kk = hand("Kh", "Kd");
+        let qq = hand("Qh", "Qd");
+        let first = cache.get_or_compute(12, 24, 36, || {
+            calls.fetch_add(1, Ordering::Relaxed);
+            rank_distribution_3way(aa, kk, qq, 400)
+        });
+        let payouts = [0.5, 0.3, 0.2];
+        let icm_equal = permutation_showdown_icm([1000.0; 3], [0.0; 3], &payouts, None);
+
+        let started = Instant::now();
+        let second = cache.get_or_compute(12, 24, 36, || {
+            calls.fetch_add(1, Ordering::Relaxed);
+            panic!("rank cache must hit on second stack config");
+        });
+        let icm_short = permutation_showdown_icm([500.0, 500.0, 1000.0], [0.0; 3], &payouts, None);
+        let elapsed = started.elapsed().as_secs_f64();
+
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert!(elapsed < 1.0, "lookup+ICM took {elapsed:.3}s");
+        for i in 0..6 {
+            assert!((first[i] - second[i]).abs() < 1e-12);
+        }
+        let ev = |table: [[f64; 3]; 6]| -> f64 {
+            (0..6).map(|perm| second[perm] * table[perm][0]).sum()
+        };
+        assert!(
+            (ev(icm_equal) - ev(icm_short)).abs() > 1e-4,
+            "stack change must change $EV"
+        );
     }
 }
