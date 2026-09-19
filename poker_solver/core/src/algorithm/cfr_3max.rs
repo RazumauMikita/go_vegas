@@ -14,6 +14,9 @@ use crate::solver::three_max::{
 use crate::solver::{empty_output, SolverInput, SolverOutput, HAND_TYPES};
 
 const DEFAULT_TOLERANCE: f64 = 0.005;
+const DCFR_ALPHA: f64 = 1.5;
+const DCFR_BETA: f64 = 0.5;
+const DCFR_GAMMA: f64 = 2.0;
 
 pub struct Cfr3Max<'a> {
     input: SolverInput,
@@ -116,11 +119,13 @@ impl<'a> Cfr3Max<'a> {
         ranges
     }
 
-    fn accumulate(&mut self, ranges: &[[f64; HAND_TYPES]; 6], weight: f64) {
-        self.weight_sum += weight;
+    fn accumulate(&mut self, ranges: &[[f64; HAND_TYPES]; 6], t: f64) {
+        let tg = t.powf(DCFR_GAMMA);
+        let beta = tg / (tg + 1.0);
+        self.weight_sum = beta * self.weight_sum + 1.0;
         for kind in 0..6 {
             for h in 0..HAND_TYPES {
-                self.sum[kind][h] += weight * ranges[kind][h];
+                self.sum[kind][h] = beta * self.sum[kind][h] + ranges[kind][h];
             }
         }
     }
@@ -151,7 +156,7 @@ impl<'a> Cfr3Max<'a> {
         &mut self,
         ranges: &[[f64; HAND_TYPES]; 6],
         evs: &[Vec<(f64, f64)>; 6],
-        weight: f64,
+        t: f64,
     ) {
         for hand in 0..HAND_TYPES {
             let reach = [
@@ -162,47 +167,47 @@ impl<'a> Cfr3Max<'a> {
                 opponent_reach(4, hand, ranges, &self.ctx),
                 opponent_reach(5, hand, ranges, &self.ctx),
             ];
-            linear_cfr(
+            dcfr(
                 &mut self.regret_btn[hand],
                 evs[0][hand],
                 self.strategy_btn[hand],
                 reach[0],
-                weight,
+                t,
             );
-            linear_cfr(
+            dcfr(
                 &mut self.regret_sb_vs_push[hand],
                 evs[1][hand],
                 self.strategy_sb_vs_push[hand],
                 reach[1],
-                weight,
+                t,
             );
-            linear_cfr(
+            dcfr(
                 &mut self.regret_bb_vs_btn[hand],
                 evs[2][hand],
                 self.strategy_bb_vs_btn[hand],
                 reach[2],
-                weight,
+                t,
             );
-            linear_cfr(
+            dcfr(
                 &mut self.regret_bb_vs_both[hand],
                 evs[3][hand],
                 self.strategy_bb_vs_both[hand],
                 reach[3],
-                weight,
+                t,
             );
-            linear_cfr(
+            dcfr(
                 &mut self.regret_sb_after_fold[hand],
                 evs[4][hand],
                 self.strategy_sb_after_fold[hand],
                 reach[4],
-                weight,
+                t,
             );
-            linear_cfr(
+            dcfr(
                 &mut self.regret_bb_vs_sb[hand],
                 evs[5][hand],
                 self.strategy_bb_vs_sb[hand],
                 reach[5],
-                weight,
+                t,
             );
         }
     }
@@ -231,9 +236,9 @@ impl SolverAlgorithm for Cfr3Max<'_> {
         let hits_before = self.ctx.cache_hits();
         let misses_before = self.ctx.cache_misses();
         let evs = self.compute_evs(&ranges);
-        let weight = (self.iterations_done + 1) as f64;
-        self.update_regrets(&ranges, &evs, weight);
-        self.accumulate(&ranges, weight);
+        let t = (self.iterations_done + 1) as f64;
+        self.update_regrets(&ranges, &evs, t);
+        self.accumulate(&ranges, t);
 
         self.iterations_done += 1;
         let last_change = self.compute_change(&ranges);
@@ -367,8 +372,15 @@ fn opponent_reach(
     }
 }
 
-fn linear_cfr(regret: &mut [f64; 2], ev: (f64, f64), sigma: [f64; 2], reach: f64, weight: f64) {
+fn dcfr(regret: &mut [f64; 2], ev: (f64, f64), sigma: [f64; 2], reach: f64, t: f64) {
     let expected = sigma[0] * ev.0 + sigma[1] * ev.1;
-    regret[0] += weight * reach * (ev.0 - expected);
-    regret[1] += weight * reach * (ev.1 - expected);
+    let pos = t.powf(DCFR_ALPHA);
+    let neg = t.powf(DCFR_BETA);
+    let pos_coef = pos / (pos + 1.0);
+    let neg_coef = neg / (neg + 1.0);
+    for r in regret.iter_mut() {
+        *r *= if *r >= 0.0 { pos_coef } else { neg_coef };
+    }
+    regret[0] += reach * (ev.0 - expected);
+    regret[1] += reach * (ev.1 - expected);
 }
