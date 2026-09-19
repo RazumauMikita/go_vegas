@@ -1,6 +1,6 @@
 use crate::card::Card;
 use crate::hand_evaluator::{evaluate_hand, HandRank};
-use crate::icm::icm_equity;
+use crate::icm::{icm_equity, IcmCache};
 
 const DECK_AFTER_SIX: usize = 46;
 
@@ -180,6 +180,29 @@ pub fn equity_3way_icm(
     payouts: &[f64],
     iterations: u64,
 ) -> [f64; 3] {
+    equity_3way_icm_with_cache(
+        hand1,
+        hand2,
+        hand3,
+        contested,
+        uncalled,
+        payouts,
+        iterations,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn equity_3way_icm_with_cache(
+    hand1: [Card; 2],
+    hand2: [Card; 2],
+    hand3: [Card; 2],
+    contested: [f64; 3],
+    uncalled: [f64; 3],
+    payouts: &[f64],
+    iterations: u64,
+    icm_cache: Option<&IcmCache>,
+) -> [f64; 3] {
     if iterations == 0 {
         return split_all(payouts);
     }
@@ -210,7 +233,8 @@ pub fn equity_3way_icm(
             contested[1] + uncalled[1],
             contested[2] + uncalled[2],
         ];
-        let sample = icm_after_showdown(new_stacks, pre_showdown, ranks, payouts);
+        let sample =
+            icm_after_showdown_with_cache(new_stacks, pre_showdown, ranks, payouts, icm_cache);
         ev[0] += sample[0];
         ev[1] += sample[1];
         ev[2] += sample[2];
@@ -227,14 +251,32 @@ pub fn icm_showdown_equity(
     ranks: [HandRank; 3],
     payouts: &[f64],
 ) -> [f64; 3] {
-    icm_after_showdown(new_stacks, pre_showdown_stacks, ranks, payouts)
+    icm_after_showdown_with_cache(new_stacks, pre_showdown_stacks, ranks, payouts, None)
 }
 
+#[cfg(test)]
 fn icm_after_showdown(
+    new_stacks: [f64; 3],
+    pre_showdown_stacks: [f64; 3],
+    ranks: [HandRank; 3],
+    payouts: &[f64],
+) -> [f64; 3] {
+    icm_after_showdown_with_cache(new_stacks, pre_showdown_stacks, ranks, payouts, None)
+}
+
+fn icm_lookup(stacks: &[f64], payouts: &[f64], cache: Option<&IcmCache>) -> Vec<f64> {
+    match cache {
+        Some(cache) => cache.lookup(stacks, payouts),
+        None => icm_equity(stacks, payouts),
+    }
+}
+
+fn icm_after_showdown_with_cache(
     new_stacks: [f64; 3],
     pre_showdown_stacks: [f64; 3],
     _ranks: [HandRank; 3],
     payouts: &[f64],
+    icm_cache: Option<&IcmCache>,
 ) -> [f64; 3] {
     let alive: Vec<usize> = (0..3).filter(|&i| new_stacks[i] > 0.0).collect();
     let busted: Vec<usize> = (0..3).filter(|&i| new_stacks[i] <= 0.0).collect();
@@ -268,7 +310,7 @@ fn icm_after_showdown(
     }
 
     if alive.len() == 3 {
-        let values = icm_equity(&new_stacks, payouts);
+        let values = icm_lookup(&new_stacks, payouts, icm_cache);
         return [values[0], values[1], values[2]];
     }
 
@@ -289,11 +331,57 @@ fn icm_after_showdown(
         .iter()
         .map(|payout| payout / remaining_sum)
         .collect();
-    let icm = icm_equity(&alive_stacks, &normalized);
+    let icm = icm_lookup(&alive_stacks, &normalized, icm_cache);
     for (offset, &index) in alive.iter().enumerate() {
         ev[index] = icm[offset] * remaining_sum;
     }
     ev
+}
+
+pub(crate) fn prefill_icm_cache(
+    cache: &mut IcmCache,
+    contested: [f64; 3],
+    uncalled: [f64; 3],
+    payouts: &[f64],
+) {
+    let hi = dummy_rank([
+        "Ah", "Ad", "Ac", "As", "Kh", "2c", "3d",
+    ]);
+    let mid = dummy_rank([
+        "Kh", "Kd", "Kc", "Qh", "Qd", "2s", "3s",
+    ]);
+    let lo = dummy_rank([
+        "9h", "8d", "7c", "5s", "4h", "3c", "2d",
+    ]);
+    let patterns = [
+        [hi, mid, lo],
+        [hi, lo, mid],
+        [mid, hi, lo],
+        [mid, lo, hi],
+        [lo, hi, mid],
+        [lo, mid, hi],
+        [hi, hi, lo],
+        [hi, lo, hi],
+        [lo, hi, hi],
+        [hi, mid, mid],
+        [mid, hi, mid],
+        [mid, mid, hi],
+        [hi, hi, hi],
+    ];
+    for ranks in patterns {
+        cache.remember_showdown(finalize_3way_stacks(contested, uncalled, ranks), payouts);
+    }
+}
+
+fn dummy_rank(cards: [&str; 7]) -> HandRank {
+    use std::str::FromStr;
+    let parsed: [Card; 7] = cards
+        .iter()
+        .map(|s| Card::from_str(s).expect("card"))
+        .collect::<Vec<_>>()
+        .try_into()
+        .unwrap();
+    evaluate_hand(&parsed)
 }
 
 fn split_all(payouts: &[f64]) -> [f64; 3] {

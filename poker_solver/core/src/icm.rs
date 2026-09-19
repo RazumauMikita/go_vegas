@@ -1,9 +1,115 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static ICM_EQUITY_CALLS: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn icm_equity_call_count() -> u64 {
+    ICM_EQUITY_CALLS.load(Ordering::Relaxed)
+}
+
+pub(crate) fn reset_icm_equity_call_count() {
+    ICM_EQUITY_CALLS.store(0, Ordering::Relaxed);
+}
+
+type IcmKey = (i64, i64, i64, u8);
+
+/// In-memory ICM memoization for one solve run.
+/// Prefill once, then lock-free lookups. Showdown ICM has only a handful of
+/// unique stack triples, so a shared map would contend under rayon.
+pub struct IcmCache {
+    entries: Vec<(IcmKey, Vec<f64>)>,
+    hits: AtomicU64,
+    misses: AtomicU64,
+}
+
+impl IcmCache {
+    pub fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
+        }
+    }
+
+    fn key(stacks: &[f64]) -> IcmKey {
+        let round = |index: usize| {
+            stacks
+                .get(index)
+                .map(|&stack| (stack * 100.0).round() as i64)
+                .unwrap_or(i64::MIN)
+        };
+        (round(0), round(1), round(2), stacks.len() as u8)
+    }
+
+    pub fn insert(&mut self, stacks: &[f64], payouts: &[f64]) {
+        let key = Self::key(stacks);
+        if self.entries.iter().any(|(existing, _)| *existing == key) {
+            return;
+        }
+        self.entries.push((key, icm_equity(stacks, payouts)));
+    }
+
+    pub fn remember_showdown(&mut self, new_stacks: [f64; 3], payouts: &[f64]) {
+        let alive: Vec<usize> = (0..3).filter(|&i| new_stacks[i] > 0.0).collect();
+        if alive.len() == 3 {
+            self.insert(&new_stacks, payouts);
+            return;
+        }
+        if alive.len() != 2 {
+            return;
+        }
+        let remaining: Vec<f64> = (0..alive.len())
+            .map(|place| payouts.get(place).copied().unwrap_or(0.0))
+            .collect();
+        let remaining_sum: f64 = remaining.iter().sum();
+        if remaining_sum <= 0.0 {
+            return;
+        }
+        let alive_stacks: Vec<f64> = alive.iter().map(|&i| new_stacks[i]).collect();
+        let normalized: Vec<f64> = remaining
+            .iter()
+            .map(|payout| payout / remaining_sum)
+            .collect();
+        self.insert(&alive_stacks, &normalized);
+    }
+
+    pub fn lookup(&self, stacks: &[f64], payouts: &[f64]) -> Vec<f64> {
+        let key = Self::key(stacks);
+        for (existing, value) in &self.entries {
+            if *existing == key {
+                self.hits.fetch_add(1, Ordering::Relaxed);
+                return value.clone();
+            }
+        }
+        self.misses.fetch_add(1, Ordering::Relaxed);
+        icm_equity(stacks, payouts)
+    }
+
+    pub fn get(&self, stacks: [f64; 3], payouts: &[f64], player_idx: usize) -> f64 {
+        self.lookup(&stacks, payouts)[player_idx]
+    }
+
+    pub fn hits(&self) -> u64 {
+        self.hits.load(Ordering::Relaxed)
+    }
+
+    pub fn misses(&self) -> u64 {
+        self.misses.load(Ordering::Relaxed)
+    }
+}
+
+impl Default for IcmCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// ICM-калькулятор по модели Malmuth-Harville.
 ///
 /// Вероятность занять k-е место для игрока i считается рекурсивно:
 /// P(i, 1) = s_i / Σs
 /// P(i, k) = Σ_{j≠i} P(j, 1) · P(i, k-1 | j выбыл)
 pub fn icm_equity(stacks: &[f64], payouts: &[f64]) -> Vec<f64> {
+    ICM_EQUITY_CALLS.fetch_add(1, Ordering::Relaxed);
     if stacks.is_empty() {
         return Vec::new();
     }
@@ -201,6 +307,22 @@ mod tests {
             equity[1],
             1e-12,
         );
+    }
+
+    #[test]
+    fn icm_cache_matches_direct_and_counts_hits() {
+        let mut cache = IcmCache::new();
+        let stacks = [2000.0, 500.0, 900.0];
+        let payouts = [0.5, 0.3, 0.2];
+        let direct = icm_equity(&stacks, &payouts);
+        cache.insert(&stacks, &payouts);
+        let first = cache.get(stacks, &payouts, 1);
+        let second = cache.get(stacks, &payouts, 1);
+
+        assert_close(first, direct[1], 1e-12);
+        assert_close(second, direct[1], 1e-12);
+        assert_eq!(cache.misses(), 0);
+        assert_eq!(cache.hits(), 2);
     }
 
     #[test]

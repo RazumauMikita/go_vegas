@@ -58,7 +58,7 @@ impl Default for SolverTab {
             big_blind: "100".to_string(),
             ante: "0".to_string(),
             max_iterations: "100".to_string(),
-            tolerance: "0.00001".to_string(),
+            tolerance: "0.001".to_string(),
             equity_cache: EquityCache::from_bytes(CACHE_BYTES).expect("embedded cache corrupted"),
             matrix_modes: HashMap::new(),
             error: None,
@@ -503,6 +503,7 @@ impl SolverTab {
             tolerance,
             num_players: self.player_count,
             verbose_convergence: false,
+            profile: false,
         })
     }
 
@@ -637,7 +638,7 @@ mod tests {
         assert_eq!(input.small_blind, 50.0);
         assert_eq!(input.big_blind, 100.0);
         assert_eq!(input.max_iterations, 100);
-        assert!((input.tolerance - 0.00001).abs() < 1e-12);
+        assert!((input.tolerance - 0.001).abs() < 1e-12);
     }
 
     #[test]

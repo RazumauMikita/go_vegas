@@ -52,6 +52,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
         tolerance: config.tolerance,
         num_players: config.num_players,
         verbose_convergence: config.verbose_convergence,
+        profile: config.profile,
     };
 
     let output = poker_core::solve(&input, &cache);
@@ -72,6 +73,7 @@ struct Config {
     num_players: usize,
     cache: PathBuf,
     verbose_convergence: bool,
+    profile: bool,
     debug_3way: bool,
     debug_bb: Option<String>,
 }
@@ -86,6 +88,7 @@ fn parse_args(args: Vec<String>) -> Result<Config, String> {
     let mut tolerance = 0.001;
     let mut cache = PathBuf::from("equity_cache.bin");
     let mut verbose_convergence = false;
+    let mut profile = false;
     let mut debug_3way = false;
     let mut debug_bb = None;
     let mut index = 0;
@@ -159,6 +162,9 @@ fn parse_args(args: Vec<String>) -> Result<Config, String> {
             "--verbose-convergence" => {
                 verbose_convergence = true;
             }
+            "--profile" => {
+                profile = true;
+            }
             "--debug-3way" => {
                 debug_3way = true;
             }
@@ -202,6 +208,7 @@ fn parse_args(args: Vec<String>) -> Result<Config, String> {
         tolerance,
         cache,
         verbose_convergence,
+        profile,
         debug_3way,
         debug_bb,
     })
@@ -228,6 +235,7 @@ fn run_debug_bb(config: &Config, hand_label: &str) -> Result<(), String> {
         tolerance: config.tolerance,
         num_players: 3,
         verbose_convergence: false,
+        profile: false,
     };
     let report = poker_core::debug_bb_report(&input, &cache, hand_label, 0.65, 0.21)?;
     println!("{report}");
@@ -503,6 +511,7 @@ Options:
   --button N
   --iterations N   (default 50)
   --tolerance X    (default 0.001)
+  --profile        (time 3-max EV functions for one sequential pass)
   --debug-3way     (print 3-way ICM MC convergence for AsKs/QhQd/7c7d)"
     );
 }

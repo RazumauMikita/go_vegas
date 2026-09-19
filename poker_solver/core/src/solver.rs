@@ -33,6 +33,8 @@ pub struct SolverInput {
     pub num_players: usize,
     /// Печать push_change / call_change по итерациям (3-max FP).
     pub verbose_convergence: bool,
+    /// Профилирование горячих EV-функций 3-max (одна последовательная проходка).
+    pub profile: bool,
 }
 
 /// Диапазоны 3-max push/fold.
@@ -578,6 +580,7 @@ mod tests {
             tolerance: 0.001,
             num_players: 2,
             verbose_convergence: false,
+            profile: false,
         }
     }
 
@@ -658,6 +661,7 @@ mod tests {
             tolerance: 0.001,
             num_players: 3,
             verbose_convergence: false,
+            profile: false,
         }
     }
 
@@ -777,6 +781,7 @@ mod tests {
             tolerance: 0.001,
             num_players: 2,
             verbose_convergence: false,
+            profile: false,
         };
         let ctx = HuContext::new(&input).expect("HU context");
 
