@@ -517,7 +517,7 @@ Options:
   --button N
   --iterations N   (default 50)
   --tolerance X    (default 0.001)
-  --algorithm fp|cfr  (default fp)
+  --algorithm fp|cfr|cfr-3max  (default fp)
   --profile        (time 3-max EV functions for one sequential pass)
   --debug-3way     (print 3-way ICM MC convergence for AsKs/QhQd/7c7d)"
     );

@@ -165,7 +165,7 @@ impl SolverAlgorithm for CfrSolver<'_> {
     }
 }
 
-fn regret_match(regret: &[f64; 2], strategy: &mut [f64; 2]) {
+pub(crate) fn regret_match(regret: &[f64; 2], strategy: &mut [f64; 2]) {
     let r0 = regret[0].max(0.0);
     let r1 = regret[1].max(0.0);
     let sum = r0 + r1;

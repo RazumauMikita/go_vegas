@@ -11,7 +11,7 @@ pub(crate) const HAND_TYPES: usize = 169;
 pub(crate) const INDIFFERENT_EPS: f64 = 1e-9;
 
 #[path = "three_max.rs"]
-mod three_max;
+pub(crate) mod three_max;
 
 /// Входные данные для солвера.
 #[derive(Debug, Clone)]
@@ -119,7 +119,10 @@ pub fn solve(input: &SolverInput, cache: &EquityCache) -> SolverOutput {
 
     match players {
         2 => algorithm::dispatch(input, cache),
-        3 => three_max::solve_3max(input, cache),
+        3 => match input.algorithm {
+            Algorithm::Cfr3Max => crate::algorithm::Cfr3Max::run(input, cache),
+            _ => three_max::solve_3max(input, cache),
+        },
         _ => empty_output(input.stacks.len()),
     }
 }
@@ -807,6 +810,106 @@ mod tests {
                 "{label}: expected {expected_pct:.1}% ± 0.5, got {got_pct:.1}%"
             );
         }
+    }
+
+    fn cfr_3max_input(stacks: [f64; 3]) -> SolverInput {
+        SolverInput {
+            stacks: stacks.to_vec(),
+            payouts: vec![0.5, 0.3, 0.2],
+            small_blind: 50.0,
+            big_blind: 100.0,
+            ante: 0.0,
+            button_index: 0,
+            max_iterations: 100,
+            tolerance: 0.005,
+            num_players: 3,
+            verbose_convergence: false,
+            profile: false,
+            algorithm: Algorithm::Cfr3Max,
+        }
+    }
+
+    fn cfr_3max_equal_output() -> &'static SolverOutput {
+        static OUTPUT: std::sync::OnceLock<SolverOutput> = std::sync::OnceLock::new();
+        OUTPUT.get_or_init(|| solve(&cfr_3max_input([1000.0, 1000.0, 1000.0]), test_cache()))
+    }
+
+    fn assert_hrc_close(label: &str, share: f64, hrc_pct: f64) {
+        let got = share * 100.0;
+        let delta = (got - hrc_pct).abs();
+        eprintln!("{label}: {got:.1}% (HRC {hrc_pct:.1}%, Δ={delta:.1}%)");
+        if delta > 2.0 {
+            eprintln!("warn: {label} Δ={delta:.1}% (got {got:.1}%, HRC {hrc_pct:.1}%)");
+        }
+        assert!(
+            delta <= 4.5,
+            "{label}: expected {hrc_pct:.1}% ± 4.5, got {got:.1}% (Δ={delta:.1}%)"
+        );
+    }
+
+    #[test]
+    fn cfr_3max_equal_stacks_converges() {
+        let output = cfr_3max_equal_output();
+        assert!(
+            output.converged,
+            "CFR 3-max should converge, iterations={}",
+            output.iterations_used
+        );
+        assert!(
+            output.iterations_used < 100,
+            "expected < 100 iterations, got {}",
+            output.iterations_used
+        );
+    }
+
+    #[test]
+    fn cfr_3max_matches_hrc() {
+        let ranges = cfr_3max_equal_output()
+            .three_max
+            .as_ref()
+            .expect("3-max ranges");
+        assert_hrc_close("BTN push", range_combo_share(&ranges.btn_push), 26.0);
+        assert_hrc_close("SB call", range_combo_share(&ranges.sb_call_vs_btn), 7.1);
+        assert_hrc_close("BB vs BTN", range_combo_share(&ranges.bb_call_vs_btn), 8.8);
+        assert_hrc_close(
+            "BB vs BTN+SB",
+            range_combo_share(&ranges.bb_call_vs_btn_and_sb),
+            1.4,
+        );
+        assert_hrc_close("SB push", range_combo_share(&ranges.sb_push), 63.8);
+        assert_hrc_close("BB vs SB", range_combo_share(&ranges.bb_call_vs_sb), 23.1);
+    }
+
+    #[test]
+    fn cfr_3max_unequal_stacks() {
+        let output = solve(&cfr_3max_input([2000.0, 500.0, 900.0]), test_cache());
+        let ranges = output.three_max.as_ref().expect("3-max ranges");
+        assert_hrc_close("BTN push", range_combo_share(&ranges.btn_push), 70.4);
+        assert_hrc_close("SB call", range_combo_share(&ranges.sb_call_vs_btn), 18.7);
+        assert_hrc_close(
+            "BB vs BTN+SB",
+            range_combo_share(&ranges.bb_call_vs_btn_and_sb),
+            25.9,
+        );
+        assert_hrc_close("BB vs BTN", range_combo_share(&ranges.bb_call_vs_btn), 12.5);
+        assert_hrc_close("SB push", range_combo_share(&ranges.sb_push), 68.7);
+        assert_hrc_close("BB vs SB", range_combo_share(&ranges.bb_call_vs_sb), 54.7);
+    }
+
+    #[test]
+    fn cfr_3max_faster_than_fp() {
+        let fp = three_max_output();
+        let cfr = cfr_3max_equal_output();
+        assert!(cfr.converged, "CFR 3-max should converge");
+        assert!(
+            cfr.iterations_used < 100,
+            "CFR expected < 100 iterations, got {}",
+            cfr.iterations_used
+        );
+        eprintln!(
+            "CFR 3-max iterations={} FP iterations={}",
+            cfr.iterations_used, fp.iterations_used
+        );
     }
 
     #[test]
