@@ -57,7 +57,10 @@ impl std::fmt::Display for ParseError {
             ParseError::NoBlinds => write!(f, "не найдены блайнды"),
             ParseError::NoPlayers => write!(f, "не найдены игроки"),
             ParseError::TooManyPlayers(n) => {
-                write!(f, "слишком много игроков ({n}), поддерживаются только 2 и 3")
+                write!(
+                    f,
+                    "слишком много игроков ({n}), поддерживаются только 2 и 3"
+                )
             }
             ParseError::InvalidFormat(msg) => write!(f, "некорректный формат: {msg}"),
         }
@@ -69,15 +72,15 @@ impl std::error::Error for ParseError {}
 static RE_TOURNAMENT: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"Tournament #(\d+), \$([\d.]+)\+\$([\d.]+)").expect("valid regex")
 });
-static RE_LEVEL_BLINDS: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"Level\s+(\S+)\s+\((\d+)/(\d+)(?:/(\d+))?\)").expect("valid regex"));
+static RE_LEVEL_BLINDS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"Level\s+(\S+)\s+\((\d+)/(\d+)(?:/(\d+))?\)").expect("valid regex")
+});
 static RE_BUTTON: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"Seat #(\d+) is the button").expect("valid regex"));
 static RE_TABLE_MAX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(\d+)-max").expect("valid regex"));
-static RE_PLAYER: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"Seat (\d+): (.+?) \((\d+) in chips\)").expect("valid regex")
-});
+static RE_PLAYER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"Seat (\d+): (.+?) \((\d+) in chips\)").expect("valid regex"));
 static RE_ANTE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r": posts the ante (\d+)").expect("valid regex"));
 
@@ -103,19 +106,11 @@ pub fn parse_hand_history(text: &str) -> Result<ParsedHand, ParseError> {
         return Err(ParseError::NotPokerStarsTournament);
     }
 
-    let tournament_id = RE_TOURNAMENT
-        .captures(text)
-        .map(|c| c[1].to_string());
-    let buy_in = RE_TOURNAMENT
-        .captures(text)
-        .and_then(|c| c[2].parse().ok());
-    let fee = RE_TOURNAMENT
-        .captures(text)
-        .and_then(|c| c[3].parse().ok());
+    let tournament_id = RE_TOURNAMENT.captures(text).map(|c| c[1].to_string());
+    let buy_in = RE_TOURNAMENT.captures(text).and_then(|c| c[2].parse().ok());
+    let fee = RE_TOURNAMENT.captures(text).and_then(|c| c[3].parse().ok());
 
-    let blinds_cap = RE_LEVEL_BLINDS
-        .captures(text)
-        .ok_or(ParseError::NoBlinds)?;
+    let blinds_cap = RE_LEVEL_BLINDS.captures(text).ok_or(ParseError::NoBlinds)?;
     let level = Some(blinds_cap[1].to_string());
     let small_blind = blinds_cap[2]
         .parse()
@@ -164,9 +159,7 @@ pub fn parse_hand_history(text: &str) -> Result<ParsedHand, ParseError> {
         return Err(ParseError::TooManyPlayers(player_count));
     }
     if player_count < 2 {
-        return Err(ParseError::InvalidFormat(
-            "нужно минимум 2 игрока".into(),
-        ));
+        return Err(ParseError::InvalidFormat("нужно минимум 2 игрока".into()));
     }
 
     let ante = if header_ante > 0.0 {
@@ -227,7 +220,11 @@ fn assign_positions(players: &mut [ParsedPlayer], button_seat: usize, table_max:
     }
 }
 
-fn seats_clockwise_from_button(seats: &[usize], button_seat: usize, table_max: usize) -> Vec<usize> {
+fn seats_clockwise_from_button(
+    seats: &[usize],
+    button_seat: usize,
+    table_max: usize,
+) -> Vec<usize> {
     let max_seat = table_max;
     let mut ordered = Vec::with_capacity(seats.len());
     let mut current = button_seat;
@@ -371,7 +368,10 @@ bbcbcv3: folds
     #[test]
     fn missing_blinds_returns_error() {
         let text = "PokerStars Hand #1: Tournament #123, $1+$0.10 USD Hold'em No Limit\nSeat 1: player (1000 in chips)";
-        assert!(matches!(parse_hand_history(text), Err(ParseError::NoBlinds)));
+        assert!(matches!(
+            parse_hand_history(text),
+            Err(ParseError::NoBlinds)
+        ));
     }
 
     #[test]

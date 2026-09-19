@@ -4,8 +4,8 @@ use std::process::ExitCode;
 use std::str::FromStr;
 
 use poker_core::{
-    combo_index, combo_label, equity_3way_icm, index_to_ranks, Card, EquityCache, SolverInput,
-    SolverOutput, ThreeMaxRanges,
+    combo_index, combo_label, equity_3way_icm, index_to_ranks, Algorithm, Card, EquityCache,
+    SolverInput, SolverOutput, ThreeMaxRanges,
 };
 
 fn main() -> ExitCode {
@@ -53,6 +53,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
         num_players: config.num_players,
         verbose_convergence: config.verbose_convergence,
         profile: config.profile,
+        algorithm: config.algorithm,
     };
 
     let output = poker_core::solve(&input, &cache);
@@ -76,6 +77,7 @@ struct Config {
     profile: bool,
     debug_3way: bool,
     debug_bb: Option<String>,
+    algorithm: Algorithm,
 }
 
 fn parse_args(args: Vec<String>) -> Result<Config, String> {
@@ -91,6 +93,7 @@ fn parse_args(args: Vec<String>) -> Result<Config, String> {
     let mut profile = false;
     let mut debug_3way = false;
     let mut debug_bb = None;
+    let mut algorithm = Algorithm::FictitiousPlay;
     let mut index = 0;
 
     while index < args.len() {
@@ -168,6 +171,13 @@ fn parse_args(args: Vec<String>) -> Result<Config, String> {
             "--debug-3way" => {
                 debug_3way = true;
             }
+            "--algorithm" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--algorithm requires a value".to_string())?;
+                algorithm = value.parse()?;
+            }
             other if other.starts_with("--debug-bb=") => {
                 debug_bb = Some(other["--debug-bb=".len()..].to_string());
             }
@@ -211,6 +221,7 @@ fn parse_args(args: Vec<String>) -> Result<Config, String> {
         profile,
         debug_3way,
         debug_bb,
+        algorithm,
     })
 }
 
@@ -236,6 +247,7 @@ fn run_debug_bb(config: &Config, hand_label: &str) -> Result<(), String> {
         num_players: 3,
         verbose_convergence: false,
         profile: false,
+        algorithm: Algorithm::FictitiousPlay,
     };
     let report = poker_core::debug_bb_report(&input, &cache, hand_label, 0.65, 0.21)?;
     println!("{report}");
@@ -279,9 +291,7 @@ fn run_debug_3way(config: &Config) -> Result<(), String> {
     println!("3-way ICM debug (BTN AsKs / SB QhQd / BB 7c7d)");
     println!(
         "Stacks: BTN={} SB={} BB={}",
-        config.stacks[btn],
-        config.stacks[sb],
-        config.stacks[bb]
+        config.stacks[btn], config.stacks[sb], config.stacks[bb]
     );
     println!("Contested (btn,sb,bb): {:?}", contested);
     println!("Uncalled  (btn,sb,bb): {:?}", uncalled);
@@ -289,19 +299,11 @@ fn run_debug_3way(config: &Config) -> Result<(), String> {
 
     for iterations in [12_u64, 1000, 10_000] {
         let ev = equity_3way_icm(
-            btn_hand,
-            sb_hand,
-            bb_hand,
-            contested,
-            uncalled,
-            payouts,
-            iterations,
+            btn_hand, sb_hand, bb_hand, contested, uncalled, payouts, iterations,
         );
         println!(
             "iterations={iterations:>5}: BTN ${:.4}  SB ${:.4}  BB ${:.4}",
-            ev[0],
-            ev[1],
-            ev[2]
+            ev[0], ev[1], ev[2]
         );
     }
 
@@ -355,8 +357,10 @@ fn print_output_hu(input: &SolverInput, output: &SolverOutput) {
         input.small_blind, input.big_blind, input.ante
     );
     println!(
-        "Iterations: {}  converged={}",
-        output.iterations_used, output.converged
+        "Iterations: {}  converged={}  algorithm={}",
+        output.iterations_used,
+        output.converged,
+        input.algorithm.as_str()
     );
     println!();
     println!("SB $EV: {:.2}%", output.equities[sb] * 100.0);
@@ -395,8 +399,10 @@ fn print_output_3max(input: &SolverInput, output: &SolverOutput, ranges: &ThreeM
         input.small_blind, input.big_blind, input.ante
     );
     println!(
-        "Iterations: {}  converged={}",
-        output.iterations_used, output.converged
+        "Iterations: {}  converged={}  algorithm={}",
+        output.iterations_used,
+        output.converged,
+        input.algorithm.as_str()
     );
     println!();
     println!("BTN $EV: {:.2}%", output.equities[btn] * 100.0);
@@ -511,6 +517,7 @@ Options:
   --button N
   --iterations N   (default 50)
   --tolerance X    (default 0.001)
+  --algorithm fp|cfr  (default fp)
   --profile        (time 3-max EV functions for one sequential pass)
   --debug-3way     (print 3-way ICM MC convergence for AsKs/QhQd/7c7d)"
     );

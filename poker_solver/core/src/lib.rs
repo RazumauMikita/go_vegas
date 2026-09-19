@@ -1,11 +1,12 @@
 #![forbid(unsafe_code)]
 
+pub mod algorithm;
 pub mod card;
-pub mod hh_parser;
 pub mod equity;
 pub mod equity_3way;
 pub mod equity_cache;
 pub mod hand_evaluator;
+pub mod hh_parser;
 pub mod icm;
 pub mod solver;
 pub mod three_way_cache;
@@ -27,6 +28,6 @@ pub use hh_parser::{
 };
 pub use icm::{icm_equity, icm_equity_for_player};
 pub use solver::{
-    debug_bb_report, solve, SolverInput, SolverOutput, ThreeMaxHandEvs, ThreeMaxRanges,
+    debug_bb_report, solve, Algorithm, SolverInput, SolverOutput, ThreeMaxHandEvs, ThreeMaxRanges,
 };
 pub use three_way_cache::ThreeWayCache;

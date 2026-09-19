@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 
 use egui::{Context, RichText, Ui};
 use poker_core::{
-    icm_equity, parse_hand_history, solver_position_index, solve, EquityCache, SolverInput,
-    SolverOutput,
+    icm_equity, parse_hand_history, solver_position_index, solve, Algorithm, EquityCache,
+    SolverInput, SolverOutput,
 };
 
 use crate::tabs::strategy_tree::{
@@ -504,6 +504,7 @@ impl SolverTab {
             num_players: self.player_count,
             verbose_convergence: false,
             profile: false,
+            algorithm: Algorithm::FictitiousPlay,
         })
     }
 

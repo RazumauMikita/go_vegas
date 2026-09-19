@@ -91,7 +91,11 @@ pub(crate) fn solve_3max(input: &SolverInput, cache: &EquityCache) -> SolverOutp
             }
             2 => {
                 let ev_call = ev_bb_call_vs_btn(hand, &btn_push, &sb_call_vs_btn, &ctx, cache);
-                best_response(ev_call, ctx.icm_btn_takes_blinds[ctx.bb], bb_call_vs_btn[hand])
+                best_response(
+                    ev_call,
+                    ctx.icm_btn_takes_blinds[ctx.bb],
+                    bb_call_vs_btn[hand],
+                )
             }
             3 => {
                 let ev_call = ev_bb_call_vs_both(hand, &btn_push, &sb_call_vs_btn, &ctx, cache);
@@ -421,8 +425,7 @@ impl ThreeMaxContext {
             tournament_equity(&hu_with_dead(stacks, btn, btn_dead, sb, bb, bb), &payouts);
 
         let (all_in_stacks, three_way_uncalled) = three_way_effective_stacks(stacks, btn, sb, bb);
-        let stacks_equal =
-            stacks[btn] == stacks[sb] && stacks[sb] == stacks[bb];
+        let stacks_equal = stacks[btn] == stacks[sb] && stacks[sb] == stacks[bb];
         let use_icm_cache = std::env::var_os("POKER_NO_ICM_CACHE").is_none();
         let parallel_hands = std::env::var_os("POKER_3MAX_SEQUENTIAL").is_none();
         let mut icm_cache = IcmCache::new();
@@ -563,7 +566,9 @@ fn profile_hot_functions(
     } else {
         100.0 * icm_hits as f64 / icm_looked as f64
     };
-    eprintln!("ICM cache this pass: {icm_hits} hits / {icm_misses} misses ({icm_hit_pct:.1}% hit rate)");
+    eprintln!(
+        "ICM cache this pass: {icm_hits} hits / {icm_misses} misses ({icm_hit_pct:.1}% hit rate)"
+    );
     eprintln!("--- end profile ---");
 }
 
@@ -1242,9 +1247,7 @@ pub(crate) fn debug_bb_report(
     writeln!(
         out,
         "BB debug: hand={} (idx={})  stacks={:?}",
-        hand_label,
-        hand_idx,
-        input.stacks
+        hand_label, hand_idx, input.stacks
     )
     .unwrap();
     writeln!(
@@ -1257,8 +1260,7 @@ pub(crate) fn debug_bb_report(
     writeln!(
         out,
         "3-way contested={:?}  uncalled={:?}",
-        ctx.all_in_stacks,
-        ctx.three_way_uncalled
+        ctx.all_in_stacks, ctx.three_way_uncalled
     )
     .unwrap();
     writeln!(out).unwrap();
@@ -1271,17 +1273,17 @@ pub(crate) fn debug_bb_report(
     let ev_call_hu_formula = p_bb_win_hu * icm_win_hu + (1.0 - p_bb_win_hu) * icm_lose_hu;
 
     writeln!(out, "=== Card removal (avg over BB combos) ===").unwrap();
-    writeln!(out, "{}", debug_card_removal(hand_idx, &btn_push, &sb_call, &ctx)).unwrap();
+    writeln!(
+        out,
+        "{}",
+        debug_card_removal(hand_idx, &btn_push, &sb_call, &ctx)
+    )
+    .unwrap();
     writeln!(out).unwrap();
 
     writeln!(out, "=== HU (SB fold) ===").unwrap();
     writeln!(out, "EV_call = {:.2}%", ev_call_hu * 100.0).unwrap();
-    writeln!(
-        out,
-        "P(BB wins vs BTN push): {:.2}%",
-        p_bb_win_hu * 100.0
-    )
-    .unwrap();
+    writeln!(out, "P(BB wins vs BTN push): {:.2}%", p_bb_win_hu * 100.0).unwrap();
     writeln!(
         out,
         "ICM: win={:.2}%  lose={:.2}%",
@@ -1305,22 +1307,11 @@ pub(crate) fn debug_bb_report(
     let ev_call_3w = ev_bb_call_vs_both(hand_idx, &btn_push, &sb_call, &ctx, cache);
     let ev_fold_3w = ev_bb_fold_vs_both(hand_idx, &btn_push, &sb_call, &ctx, cache);
 
-    let breakdown = debug_bb_3way_scenarios(
-        hand_idx,
-        &btn_push,
-        &sb_call,
-        &ctx,
-        THREE_WAY_BOARDS,
-    );
+    let breakdown = debug_bb_3way_scenarios(hand_idx, &btn_push, &sb_call, &ctx, THREE_WAY_BOARDS);
 
     writeln!(out, "=== 3-way (SB call) ===").unwrap();
     writeln!(out, "{}", breakdown.report).unwrap();
-    writeln!(
-        out,
-        "EV_call (solver) = {:.2}%",
-        ev_call_3w * 100.0
-    )
-    .unwrap();
+    writeln!(out, "EV_call (solver) = {:.2}%", ev_call_3w * 100.0).unwrap();
     writeln!(out, "EV_fold = {:.2}%", ev_fold_3w * 100.0).unwrap();
     writeln!(
         out,
@@ -1395,8 +1386,7 @@ pub(crate) fn debug_bb_report(
         writeln!(
             out,
             "ANOMALY: EV_call(3-way) {:.4} <= EV_call(HU) {:.4}",
-            ev_call_3w,
-            ev_call_hu
+            ev_call_3w, ev_call_hu
         )
         .unwrap();
     }
@@ -1406,8 +1396,7 @@ pub(crate) fn debug_bb_report(
         writeln!(
             out,
             "ANOMALY: EV_call(3-way) {:.4} <= EV_fold(3-way) {:.4}",
-            ev_call_3w,
-            ev_fold_3w
+            ev_call_3w, ev_fold_3w
         )
         .unwrap();
     }
@@ -1583,13 +1572,7 @@ fn debug_bb_3way_scenarios(
         }
     }
 
-    let labels = [
-        "other/tie",
-        "S1",
-        "S2",
-        "S3",
-        "S4",
-    ];
+    let labels = ["other/tie", "S1", "S2", "S3", "S4"];
     let total = count.iter().sum::<u64>().max(1) as f64;
     let mut weighted_ev = 0.0_f64;
     let mut out = String::new();
@@ -1675,8 +1658,7 @@ fn debug_card_removal(
     writeln!(
         out,
         "Nominal range sizes: BTN push {:.0} combos, SB call {:.0} combos",
-        btn_total_avg,
-        sb_total_avg
+        btn_total_avg, sb_total_avg
     )
     .unwrap();
     out
@@ -1732,22 +1714,10 @@ fn sample_ranks(
             board[4],
         ]),
         evaluate_hand(&[
-            sb_hand[0],
-            sb_hand[1],
-            board[0],
-            board[1],
-            board[2],
-            board[3],
-            board[4],
+            sb_hand[0], sb_hand[1], board[0], board[1], board[2], board[3], board[4],
         ]),
         evaluate_hand(&[
-            bb_hand[0],
-            bb_hand[1],
-            board[0],
-            board[1],
-            board[2],
-            board[3],
-            board[4],
+            bb_hand[0], bb_hand[1], board[0], board[1], board[2], board[3], board[4],
         ]),
     ];
     (ranks, board)
@@ -1807,6 +1777,7 @@ mod tests {
             num_players: 3,
             verbose_convergence: false,
             profile: false,
+            algorithm: crate::solver::Algorithm::FictitiousPlay,
         };
         let ctx = ThreeMaxContext::new(&input, ThreeWayCache::new()).expect("ctx");
         assert_eq!(ctx.all_in_stacks, [900.0, 500.0, 900.0]);
@@ -1827,6 +1798,7 @@ mod tests {
             num_players: 3,
             verbose_convergence: false,
             profile: false,
+            algorithm: crate::solver::Algorithm::FictitiousPlay,
         };
         let ctx = ThreeMaxContext::new(&input, ThreeWayCache::new()).expect("ctx");
         let ones = [1.0; HAND_TYPES];

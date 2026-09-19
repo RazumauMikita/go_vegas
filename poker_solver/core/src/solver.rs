@@ -1,8 +1,11 @@
 use std::collections::HashMap;
 
+use crate::algorithm;
 use crate::card::Card;
 use crate::equity_cache::{expand_combo, hands_overlap, EquityCache};
 use crate::icm::icm_equity;
+
+pub use crate::algorithm::Algorithm;
 
 pub(crate) const HAND_TYPES: usize = 169;
 pub(crate) const INDIFFERENT_EPS: f64 = 1e-9;
@@ -35,6 +38,8 @@ pub struct SolverInput {
     pub verbose_convergence: bool,
     /// Профилирование горячих EV-функций 3-max (одна последовательная проходка).
     pub profile: bool,
+    /// Алгоритм поиска равновесия. По умолчанию Fictitious Play.
+    pub algorithm: Algorithm,
 }
 
 /// Диапазоны 3-max push/fold.
@@ -113,76 +118,35 @@ pub fn solve(input: &SolverInput, cache: &EquityCache) -> SolverOutput {
     }
 
     match players {
-        2 => solve_hu(input, cache),
+        2 => algorithm::dispatch(input, cache),
         3 => three_max::solve_3max(input, cache),
         _ => empty_output(input.stacks.len()),
     }
 }
 
-fn solve_hu(input: &SolverInput, cache: &EquityCache) -> SolverOutput {
-    let ctx = match HuContext::new(input) {
-        Some(ctx) => ctx,
-        None => return empty_output(input.stacks.len()),
-    };
-
-    let mut push_range = [1.0; HAND_TYPES];
-    let mut call_range = [1.0; HAND_TYPES];
-    let mut push_sum = [0.0; HAND_TYPES];
-    let mut call_sum = [0.0; HAND_TYPES];
-    let mut converged = false;
-    let mut iterations_used = 0;
-
-    for iteration in 1..=input.max_iterations {
-        iterations_used = iteration;
-
-        let mut br_push = [0.0; HAND_TYPES];
-        let mut br_call = [0.0; HAND_TYPES];
-
-        for hand_idx in 0..HAND_TYPES {
-            let ev_push = ev_push_sb(hand_idx, &call_range, &ctx, cache);
-            br_push[hand_idx] = best_response(ev_push, ctx.ev_sb_fold, push_range[hand_idx]);
-        }
-
-        for hand_idx in 0..HAND_TYPES {
-            let ev_call = ev_call_bb(hand_idx, &push_range, &ctx, cache);
-            br_call[hand_idx] = best_response(ev_call, ctx.ev_bb_fold, call_range[hand_idx]);
-        }
-
-        let mut change = 0.0;
-        let t = iteration as f64;
-        for hand_idx in 0..HAND_TYPES {
-            push_sum[hand_idx] += br_push[hand_idx];
-            call_sum[hand_idx] += br_call[hand_idx];
-            let next_push = push_sum[hand_idx] / t;
-            let next_call = call_sum[hand_idx] / t;
-            change += (next_push - push_range[hand_idx]).abs();
-            change += (next_call - call_range[hand_idx]).abs();
-            push_range[hand_idx] = next_push;
-            call_range[hand_idx] = next_call;
-        }
-
-        let mean_change = change / (2.0 * HAND_TYPES as f64);
-        if change < input.tolerance || mean_change < input.tolerance {
-            converged = true;
-            break;
-        }
-    }
-
+pub(crate) fn build_hu_output(
+    ctx: &HuContext,
+    cache: &EquityCache,
+    push_range: &[f64; HAND_TYPES],
+    call_range: &[f64; HAND_TYPES],
+    sb_equity: f64,
+    iterations_used: usize,
+    converged: bool,
+) -> SolverOutput {
     let mut push_ranges = vec![[0.0; HAND_TYPES]; 2];
     let mut call_ranges = vec![[0.0; HAND_TYPES]; 2];
-    push_ranges[ctx.sb] = push_range;
-    call_ranges[ctx.bb] = call_range;
+    push_ranges[ctx.sb] = *push_range;
+    call_ranges[ctx.bb] = *call_range;
 
-    let sb_equity = average_sb_equity(&push_range, &call_range, &ctx, cache);
     let mut equities = vec![0.0; 2];
     equities[ctx.sb] = sb_equity;
     equities[ctx.bb] = 1.0 - sb_equity;
 
     let mut hand_evs = vec![[0.0; HAND_TYPES]; 2];
     for hand_idx in 0..HAND_TYPES {
-        let ev_push = ev_push_sb(hand_idx, &call_range, &ctx, cache);
+        let ev_push = ev_push_sb(hand_idx, call_range, ctx, cache);
         hand_evs[ctx.sb][hand_idx] = (ev_push - ctx.ev_sb_fold) * HAND_EV_SCALE;
-        let ev_call = ev_call_bb(hand_idx, &push_range, &ctx, cache);
+        let ev_call = ev_call_bb(hand_idx, push_range, ctx, cache);
         hand_evs[ctx.bb][hand_idx] = (ev_call - ctx.ev_bb_fold) * HAND_EV_SCALE;
     }
 
@@ -211,24 +175,24 @@ pub(crate) fn empty_output(players: usize) -> SolverOutput {
     }
 }
 
-struct HuContext {
-    sb: usize,
-    bb: usize,
+pub(crate) struct HuContext {
+    pub(crate) sb: usize,
+    pub(crate) bb: usize,
     payouts: Vec<f64>,
-    combos: Vec<Vec<[Card; 2]>>,
-    unblocked: Vec<Vec<[u8; HAND_TYPES]>>,
-    ev_sb_fold: f64,
-    ev_sb_bb_folds: f64,
-    ev_bb_fold: f64,
-    ev_sb_showdown_win: f64,
-    ev_sb_showdown_lose: f64,
-    ev_bb_showdown_win: f64,
-    ev_bb_showdown_lose: f64,
+    pub(crate) combos: Vec<Vec<[Card; 2]>>,
+    pub(crate) unblocked: Vec<Vec<[u8; HAND_TYPES]>>,
+    pub(crate) ev_sb_fold: f64,
+    pub(crate) ev_sb_bb_folds: f64,
+    pub(crate) ev_bb_fold: f64,
+    pub(crate) ev_sb_showdown_win: f64,
+    pub(crate) ev_sb_showdown_lose: f64,
+    pub(crate) ev_bb_showdown_win: f64,
+    pub(crate) ev_bb_showdown_lose: f64,
     icm_cache: HashMap<[u64; 2], Vec<f64>>,
 }
 
 impl HuContext {
-    fn new(input: &SolverInput) -> Option<Self> {
+    pub(crate) fn new(input: &SolverInput) -> Option<Self> {
         if input.stacks.len() != 2 {
             return None;
         }
@@ -400,7 +364,7 @@ pub(crate) fn best_response(ev_action: f64, ev_fold: f64, current: f64) -> f64 {
     }
 }
 
-fn ev_push_sb(
+pub(crate) fn ev_push_sb(
     hand_idx: usize,
     call_range: &[f64; HAND_TYPES],
     ctx: &HuContext,
@@ -461,7 +425,7 @@ fn ev_push_sb_combo(
     p_fold * ctx.ev_sb_bb_folds + p_call * ev_showdown
 }
 
-fn ev_call_bb(
+pub(crate) fn ev_call_bb(
     hand_idx: usize,
     push_range: &[f64; HAND_TYPES],
     ctx: &HuContext,
@@ -525,7 +489,7 @@ fn expand_hand_to_combos(hand_idx: u8) -> Vec<[Card; 2]> {
     expand_combo(hand_idx)
 }
 
-fn average_sb_equity(
+pub(crate) fn average_sb_equity(
     push_range: &[f64; HAND_TYPES],
     call_range: &[f64; HAND_TYPES],
     ctx: &HuContext,
@@ -581,6 +545,7 @@ mod tests {
             num_players: 2,
             verbose_convergence: false,
             profile: false,
+            algorithm: Algorithm::FictitiousPlay,
         }
     }
 
@@ -649,6 +614,87 @@ mod tests {
         );
     }
 
+    fn cfr_input(stacks: [f64; 2]) -> SolverInput {
+        let mut input = test_input(stacks);
+        input.algorithm = Algorithm::Cfr;
+        input.max_iterations = 1000;
+        input
+    }
+
+    #[test]
+    fn fp_hu_regression() {
+        let output = solve(&test_input([1000.0, 1000.0]), test_cache());
+        let sb_push = range_combo_share(&output.push_ranges[0]) * 100.0;
+        let bb_call = range_combo_share(&output.call_ranges[1]) * 100.0;
+        assert!(
+            (sb_push - 59.2).abs() <= 0.5,
+            "SB push expected 59.2% ± 0.5, got {sb_push:.1}%"
+        );
+        assert!(
+            (bb_call - 37.8).abs() <= 0.5,
+            "BB call expected 37.8% ± 0.5, got {bb_call:.1}%"
+        );
+    }
+
+    #[test]
+    fn cfr_hu_matches_hrc() {
+        let output = solve(&cfr_input([1000.0, 1000.0]), test_cache());
+        let sb_push = range_combo_share(&output.push_ranges[0]) * 100.0;
+        let bb_call = range_combo_share(&output.call_ranges[1]) * 100.0;
+        assert!(
+            (sb_push - 59.2).abs() <= 1.5,
+            "SB push expected 59.2% ± 1.5 (HRC 58.3%), got {sb_push:.1}%"
+        );
+        assert!(
+            (bb_call - 37.8).abs() <= 1.5,
+            "BB call expected 37.8% ± 1.5 (HRC 37.4%), got {bb_call:.1}%"
+        );
+    }
+
+    #[test]
+    fn cfr_hu_unequal_stacks() {
+        let equal = solve(&cfr_input([1000.0, 1000.0]), test_cache());
+        let short = solve(&cfr_input([500.0, 1000.0]), test_cache());
+        let equal_share = range_combo_share(&equal.push_ranges[0]);
+        let short_share = range_combo_share(&short.push_ranges[0]);
+        assert!(
+            short_share > equal_share,
+            "short SB should push wider: short={:.1}% equal={:.1}%",
+            short_share * 100.0,
+            equal_share * 100.0
+        );
+    }
+
+    #[test]
+    fn cfr_converges_faster_than_fp() {
+        let cache = test_cache();
+        let mut fp_input = test_input([1000.0, 1000.0]);
+        fp_input.max_iterations = 1000;
+        let mut cfr_input = fp_input.clone();
+        cfr_input.algorithm = Algorithm::Cfr;
+
+        let fp = solve(&fp_input, cache);
+        let cfr = solve(&cfr_input, cache);
+        assert!(fp.converged, "FP should converge");
+        assert!(cfr.converged, "CFR should converge");
+        assert!(
+            cfr.iterations_used < 50,
+            "CFR expected < 50 iterations, got {}",
+            cfr.iterations_used
+        );
+    }
+
+    #[test]
+    fn cfr_regret_non_negative_when_converged() {
+        let input = cfr_input([1000.0, 1000.0]);
+        let max_regret = crate::algorithm::cfr::cfr_max_instantaneous_regret(&input, test_cache())
+            .expect("CFR solver");
+        assert!(
+            max_regret < 0.01,
+            "max instantaneous regret {max_regret:.4} should be < 0.01"
+        );
+    }
+
     fn three_max_input() -> SolverInput {
         SolverInput {
             stacks: vec![1000.0, 1000.0, 1000.0],
@@ -662,6 +708,7 @@ mod tests {
             num_players: 3,
             verbose_convergence: false,
             profile: false,
+            algorithm: Algorithm::FictitiousPlay,
         }
     }
 
@@ -782,6 +829,7 @@ mod tests {
             num_players: 2,
             verbose_convergence: false,
             profile: false,
+            algorithm: Algorithm::FictitiousPlay,
         };
         let ctx = HuContext::new(&input).expect("HU context");
 

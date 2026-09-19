@@ -181,14 +181,7 @@ pub fn equity_3way_icm(
     iterations: u64,
 ) -> [f64; 3] {
     equity_3way_icm_with_cache(
-        hand1,
-        hand2,
-        hand3,
-        contested,
-        uncalled,
-        payouts,
-        iterations,
-        None,
+        hand1, hand2, hand3, contested, uncalled, payouts, iterations, None,
     )
 }
 
@@ -344,15 +337,9 @@ pub(crate) fn prefill_icm_cache(
     uncalled: [f64; 3],
     payouts: &[f64],
 ) {
-    let hi = dummy_rank([
-        "Ah", "Ad", "Ac", "As", "Kh", "2c", "3d",
-    ]);
-    let mid = dummy_rank([
-        "Kh", "Kd", "Kc", "Qh", "Qd", "2s", "3s",
-    ]);
-    let lo = dummy_rank([
-        "9h", "8d", "7c", "5s", "4h", "3c", "2d",
-    ]);
+    let hi = dummy_rank(["Ah", "Ad", "Ac", "As", "Kh", "2c", "3d"]);
+    let mid = dummy_rank(["Kh", "Kd", "Kc", "Qh", "Qd", "2s", "3s"]);
+    let lo = dummy_rank(["9h", "8d", "7c", "5s", "4h", "3c", "2d"]);
     let patterns = [
         [hi, mid, lo],
         [hi, lo, mid],
