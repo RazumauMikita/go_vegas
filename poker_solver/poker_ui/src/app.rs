@@ -1,6 +1,9 @@
 use egui::{Context, Ui};
+use poker_core::ThreeWayRankCache;
 
 use crate::tabs::{EquityTab, EvalTab, IcmTab, SolverTab};
+
+const THREE_WAY_RANK_CACHE_BYTES: &[u8] = include_bytes!("../assets/three_way_rank_cache.bin");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
@@ -20,6 +23,7 @@ pub struct PokerApp {
 
 impl Default for PokerApp {
     fn default() -> Self {
+        ThreeWayRankCache::install_embedded(THREE_WAY_RANK_CACHE_BYTES);
         Self {
             active_tab: Tab::Solver,
             solver: SolverTab::default(),

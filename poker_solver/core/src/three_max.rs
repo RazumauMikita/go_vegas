@@ -18,7 +18,7 @@ const THREE_WAY_BOARDS: u64 = 100;
 const THREE_WAY_CACHE_FILE: &str = "three_way_rank_cache.bin";
 
 pub(crate) fn load_three_way_cache() -> ThreeWayRankCache {
-    ThreeWayRankCache::load(Path::new(THREE_WAY_CACHE_FILE))
+    ThreeWayRankCache::load_or_embedded(Path::new(THREE_WAY_CACHE_FILE))
         .unwrap_or_else(|_| ThreeWayRankCache::new())
 }
 
@@ -399,6 +399,7 @@ pub(crate) struct ThreeMaxContext {
     three_way: ThreeWayRankCache,
     icm_cache: IcmCache,
     pub(crate) parallel_hands: bool,
+    rank_cache_strict: bool,
 }
 
 impl ThreeMaxContext {
@@ -457,6 +458,7 @@ impl ThreeMaxContext {
         let (all_in_stacks, three_way_uncalled) = three_way_effective_stacks(stacks, btn, sb, bb);
         let use_icm_cache = std::env::var_os("POKER_NO_ICM_CACHE").is_none();
         let parallel_hands = std::env::var_os("POKER_3MAX_SEQUENTIAL").is_none();
+        let rank_cache_strict = input.rank_cache_strict;
         let mut icm_cache = IcmCache::new();
         if use_icm_cache {
             crate::equity_3way::prefill_icm_cache(
@@ -495,6 +497,7 @@ impl ThreeMaxContext {
             three_way,
             icm_cache,
             parallel_hands,
+            rank_cache_strict,
         })
     }
 
@@ -1139,10 +1142,11 @@ fn three_way_ev(
         } else {
             (hand_a, hand_b, hero, 2)
         };
-        let ranks_prob = ctx.three_way.get_or_compute(
+        let ranks_prob = ctx.three_way.lookup(
             combo_index(btn_h),
             combo_index(sb_h),
             combo_index(bb_h),
+            ctx.rank_cache_strict,
             || rank_distribution_3way(btn_h, sb_h, bb_h, THREE_WAY_BOARDS),
         );
         let mut sample = 0.0;
@@ -1801,6 +1805,7 @@ mod tests {
             verbose_convergence: false,
             profile: false,
             algorithm: crate::solver::Algorithm::FictitiousPlay,
+            rank_cache_strict: false,
         };
         let ctx = ThreeMaxContext::new(&input, ThreeWayRankCache::new()).expect("ctx");
         assert_eq!(ctx.all_in_stacks, [900.0, 500.0, 900.0]);
@@ -1822,6 +1827,7 @@ mod tests {
             verbose_convergence: false,
             profile: false,
             algorithm: crate::solver::Algorithm::FictitiousPlay,
+            rank_cache_strict: false,
         };
         let ctx = ThreeMaxContext::new(&input, ThreeWayRankCache::new()).expect("ctx");
         let ones = [1.0; HAND_TYPES];

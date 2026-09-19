@@ -2,3 +2,4 @@
 **/*.rs.bk
 /equity_3way_cache.bin
 **/three_way_rank_cache.bin
+**/three_way_rank_cache_full.bin

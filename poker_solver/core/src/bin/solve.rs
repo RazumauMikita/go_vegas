@@ -54,6 +54,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
         verbose_convergence: config.verbose_convergence,
         profile: config.profile,
         algorithm: config.algorithm,
+        rank_cache_strict: config.rank_cache_strict,
     };
 
     let output = poker_core::solve(&input, &cache);
@@ -78,6 +79,7 @@ struct Config {
     debug_3way: bool,
     debug_bb: Option<String>,
     algorithm: Algorithm,
+    rank_cache_strict: bool,
 }
 
 fn parse_args(args: Vec<String>) -> Result<Config, String> {
@@ -94,6 +96,7 @@ fn parse_args(args: Vec<String>) -> Result<Config, String> {
     let mut debug_3way = false;
     let mut debug_bb = None;
     let mut algorithm = Algorithm::FictitiousPlay;
+    let mut rank_cache_strict = false;
     let mut index = 0;
 
     while index < args.len() {
@@ -178,6 +181,9 @@ fn parse_args(args: Vec<String>) -> Result<Config, String> {
                     .ok_or_else(|| "--algorithm requires a value".to_string())?;
                 algorithm = value.parse()?;
             }
+            "--rank-cache-strict" => {
+                rank_cache_strict = true;
+            }
             other if other.starts_with("--debug-bb=") => {
                 debug_bb = Some(other["--debug-bb=".len()..].to_string());
             }
@@ -222,6 +228,7 @@ fn parse_args(args: Vec<String>) -> Result<Config, String> {
         debug_3way,
         debug_bb,
         algorithm,
+        rank_cache_strict,
     })
 }
 
@@ -248,6 +255,7 @@ fn run_debug_bb(config: &Config, hand_label: &str) -> Result<(), String> {
         verbose_convergence: false,
         profile: false,
         algorithm: Algorithm::FictitiousPlay,
+        rank_cache_strict: config.rank_cache_strict,
     };
     let report = poker_core::debug_bb_report(&input, &cache, hand_label, 0.65, 0.21)?;
     println!("{report}");
@@ -518,6 +526,7 @@ Options:
   --iterations N   (default 50)
   --tolerance X    (default 0.001)
   --algorithm fp|cfr|cfr-3max  (default fp)
+  --rank-cache-strict  (error on 3-way rank cache miss instead of lazy compute)
   --profile        (time 3-max EV functions for one sequential pass)
   --debug-3way     (print 3-way ICM MC convergence for AsKs/QhQd/7c7d)"
     );

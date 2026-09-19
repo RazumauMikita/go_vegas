@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use egui::{Context, RichText, Ui};
 use poker_core::{
-    icm_equity, parse_hand_history, solver_position_index, solve, Algorithm, EquityCache,
+    icm_equity, parse_hand_history, solve, solver_position_index, Algorithm, EquityCache,
     SolverInput, SolverOutput,
 };
 
@@ -537,6 +537,7 @@ impl SolverTab {
             verbose_convergence: false,
             profile: false,
             algorithm: resolve_algorithm(self.algorithm, self.player_count),
+            rank_cache_strict: false,
         })
     }
 
@@ -694,18 +695,9 @@ mod tests {
 
     #[test]
     fn resolve_algorithm_maps_by_player_count() {
-        assert_eq!(
-            resolve_algorithm(Algorithm::Cfr3Max, 2),
-            Algorithm::Cfr
-        );
-        assert_eq!(
-            resolve_algorithm(Algorithm::Cfr, 3),
-            Algorithm::Cfr3Max
-        );
-        assert_eq!(
-            resolve_algorithm(Algorithm::Cfr3Max, 3),
-            Algorithm::Cfr3Max
-        );
+        assert_eq!(resolve_algorithm(Algorithm::Cfr3Max, 2), Algorithm::Cfr);
+        assert_eq!(resolve_algorithm(Algorithm::Cfr, 3), Algorithm::Cfr3Max);
+        assert_eq!(resolve_algorithm(Algorithm::Cfr3Max, 3), Algorithm::Cfr3Max);
     }
 
     #[test]

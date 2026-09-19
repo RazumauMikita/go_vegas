@@ -1,5 +1,7 @@
 use std::sync::OnceLock;
 
+use rayon::prelude::*;
+
 use crate::card::Card;
 use crate::hand_evaluator::{evaluate_hand, HandRank};
 use crate::icm::{icm_equity, IcmCache};
@@ -194,6 +196,26 @@ pub fn rank_distribution_3way(
     hand3: [Card; 2],
     iterations: u64,
 ) -> [f64; 6] {
+    rank_distribution_3way_inner(hand1, hand2, hand3, iterations, true)
+}
+
+/// Как `rank_distribution_3way`, но без rayon внутри samples (для par_iter по тройкам).
+pub fn rank_distribution_3way_serial(
+    hand1: [Card; 2],
+    hand2: [Card; 2],
+    hand3: [Card; 2],
+    iterations: u64,
+) -> [f64; 6] {
+    rank_distribution_3way_inner(hand1, hand2, hand3, iterations, false)
+}
+
+fn rank_distribution_3way_inner(
+    hand1: [Card; 2],
+    hand2: [Card; 2],
+    hand3: [Card; 2],
+    iterations: u64,
+    parallel: bool,
+) -> [f64; 6] {
     if iterations == 0 {
         return [1.0 / 6.0; 6];
     }
@@ -204,14 +226,81 @@ pub fn rank_distribution_3way(
     }
 
     let available = available_cards(dead);
-    let mut rng = Rng::new(0xB7E1_31D1_9A8F_5C03 ^ hash_six(dead));
+    let base_seed = 0xB7E1_31D1_9A8F_5C03 ^ hash_six(dead);
+    let counts = if parallel {
+        rank_distribution_counts(hand1, hand2, hand3, available, base_seed, iterations)
+    } else {
+        rank_distribution_counts_chunk(hand1, hand2, hand3, available, base_seed, iterations)
+    };
+    let total = iterations as f64;
+    counts.map(|count| count / total)
+}
+
+const RANK_DIST_THREADS: usize = 12;
+
+fn rank_distribution_counts(
+    hand1: [Card; 2],
+    hand2: [Card; 2],
+    hand3: [Card; 2],
+    available: [Card; DECK_AFTER_SIX],
+    base_seed: u64,
+    iterations: u64,
+) -> [f64; 6] {
+    // Один уровень параллелизма: внутри rayon-воркера samples идут последовательно.
+    let nested = rayon::current_thread_index().is_some();
+    let threads = if nested {
+        1
+    } else {
+        RANK_DIST_THREADS.min(iterations as usize)
+    };
+    if threads <= 1 {
+        return rank_distribution_counts_chunk(
+            hand1, hand2, hand3, available, base_seed, iterations,
+        );
+    }
+
+    let chunk_base = iterations / threads as u64;
+    let extra = iterations % threads as u64;
+    (0..threads)
+        .into_par_iter()
+        .map(|thread| {
+            let start = thread as u64 * chunk_base + (thread as u64).min(extra);
+            let count = chunk_base + if thread < extra as usize { 1 } else { 0 };
+            rank_distribution_counts_chunk(
+                hand1,
+                hand2,
+                hand3,
+                available,
+                base_seed ^ start.wrapping_mul(0x9E37_79B9_7F4A_7C15),
+                count,
+            )
+        })
+        .reduce(
+            || [0.0; 6],
+            |mut acc, chunk| {
+                for i in 0..6 {
+                    acc[i] += chunk[i];
+                }
+                acc
+            },
+        )
+}
+
+fn rank_distribution_counts_chunk(
+    hand1: [Card; 2],
+    hand2: [Card; 2],
+    hand3: [Card; 2],
+    available: [Card; DECK_AFTER_SIX],
+    seed: u64,
+    count: u64,
+) -> [f64; 6] {
+    let mut rng = Rng::new(seed);
     let mut indices = [0_u8; DECK_AFTER_SIX];
     for (slot, index) in indices.iter_mut().enumerate() {
         *index = slot as u8;
     }
-
     let mut counts = [0.0; 6];
-    for _ in 0..iterations {
+    for _ in 0..count {
         let board = sample_board(&available, &mut indices, &mut rng);
         let ranks = [
             evaluate_seven(hand1, board),
@@ -219,13 +308,11 @@ pub fn rank_distribution_3way(
             evaluate_seven(hand3, board),
         ];
         let weights = rank_permutation_weights(ranks);
-        for i in 0..6 {
-            counts[i] += weights[i];
+        for j in 0..6 {
+            counts[j] += weights[j];
         }
     }
-
-    let total = iterations as f64;
-    counts.map(|count| count / total)
+    counts
 }
 
 /// ICM всех трёх игроков для каждой из 6 перестановок (считается один раз на стеки).

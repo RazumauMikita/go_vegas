@@ -40,6 +40,8 @@ pub struct SolverInput {
     pub profile: bool,
     /// Алгоритм поиска равновесия. По умолчанию Fictitious Play.
     pub algorithm: Algorithm,
+    /// Если true, SENTINEL в 3-way rank cache — ошибка, без lazy compute.
+    pub rank_cache_strict: bool,
 }
 
 /// Диапазоны 3-max push/fold.
@@ -549,6 +551,7 @@ mod tests {
             verbose_convergence: false,
             profile: false,
             algorithm: Algorithm::FictitiousPlay,
+            rank_cache_strict: false,
         }
     }
 
@@ -712,6 +715,7 @@ mod tests {
             verbose_convergence: false,
             profile: false,
             algorithm: Algorithm::FictitiousPlay,
+            rank_cache_strict: false,
         }
     }
 
@@ -826,6 +830,7 @@ mod tests {
             verbose_convergence: false,
             profile: false,
             algorithm: Algorithm::Cfr3Max,
+            rank_cache_strict: false,
         }
     }
 
@@ -933,6 +938,7 @@ mod tests {
             verbose_convergence: false,
             profile: false,
             algorithm: Algorithm::FictitiousPlay,
+            rank_cache_strict: false,
         };
         let ctx = HuContext::new(&input).expect("HU context");
 
