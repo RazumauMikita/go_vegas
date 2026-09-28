@@ -6,6 +6,7 @@ pub mod card;
 pub mod equity;
 pub mod equity_3way;
 pub mod equity_cache;
+pub mod four_way_rank_cache;
 pub mod hand_evaluator;
 pub mod hh_parser;
 pub mod icm;
@@ -23,6 +24,10 @@ pub use equity_3way::{
 pub use equity_cache::{
     combo_index, combo_label, expand_combo, index_to_ranks, EquityCache, EquityCacheError,
     UNIQUE_PAIR_COUNT,
+};
+pub use four_way_rank_cache::{
+    FourWayRankCache, CACHE_SIZE as FOUR_WAY_CACHE_SIZE, FILE_BYTES as FOUR_WAY_FILE_BYTES,
+    NUM_PERMS as FOUR_WAY_NUM_PERMS, STORED_PERMS,
 };
 pub use hand_evaluator::{evaluate_hand, HandCategory, HandRank};
 pub use hh_parser::{
