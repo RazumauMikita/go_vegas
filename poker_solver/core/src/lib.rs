@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod algorithm;
+pub mod bucketing;
 pub mod card;
 pub mod equity;
 pub mod equity_3way;
@@ -11,6 +12,7 @@ pub mod icm;
 pub mod solver;
 pub mod three_way_rank_cache;
 
+pub use bucketing::{compute_bucket_map, Bucketing, NUM_BUCKETS};
 pub use card::{Card, CardParseError, RANK_CHARS, SUIT_CHARS};
 pub use equity::{equity_exact, equity_monte_carlo, parse_range, EquityResult, HandRange};
 pub use equity_3way::{
