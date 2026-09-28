@@ -5,7 +5,7 @@ use std::str::FromStr;
 
 use poker_core::{
     combo_index, combo_label, equity_3way_icm, index_to_ranks, Algorithm, Card, EquityCache,
-    SolverInput, SolverOutput, ThreeMaxRanges,
+    FourMaxRanges, SolverInput, SolverOutput, ThreeMaxRanges,
 };
 
 fn main() -> ExitCode {
@@ -57,8 +57,13 @@ fn run(args: Vec<String>) -> Result<(), String> {
         rank_cache_strict: config.rank_cache_strict,
     };
 
+    let started = std::time::Instant::now();
     let output = poker_core::solve(&input, &cache);
+    let elapsed = started.elapsed().as_secs_f64();
     print_output(&input, &output);
+    if input.stacks.len() == 4 {
+        println!("Time: {elapsed:.2}s");
+    }
 
     Ok(())
 }
@@ -196,8 +201,8 @@ fn parse_args(args: Vec<String>) -> Result<Config, String> {
     let payouts = payouts.ok_or_else(|| "missing --payouts".to_string())?;
     let blinds = blinds.ok_or_else(|| "missing --blinds".to_string())?;
 
-    if stacks.len() != 2 && stacks.len() != 3 {
-        return Err("solver requires 2 or 3 stacks".to_string());
+    if stacks.len() != 2 && stacks.len() != 3 && stacks.len() != 4 {
+        return Err("solver requires 2, 3, or 4 stacks".to_string());
     }
     if blinds.len() != 2 {
         return Err("--blinds requires SB,BB".to_string());
@@ -345,6 +350,12 @@ fn parse_number_list(input: &str, label: &str) -> Result<Vec<f64>, String> {
 }
 
 fn print_output(input: &SolverInput, output: &SolverOutput) {
+    if input.stacks.len() == 4 {
+        if let Some(ranges) = output.four_max.as_ref() {
+            print_output_4max(input, output, ranges);
+            return;
+        }
+    }
     if input.stacks.len() == 3 {
         if let Some(ranges) = output.three_max.as_ref() {
             print_output_3max(input, output, ranges);
@@ -390,6 +401,49 @@ fn print_output_hu(input: &SolverInput, output: &SolverOutput) {
     println!();
     println!("BB call 13x13 (A..2, suited above diagonal, offsuit below):");
     print_matrix(&output.call_ranges[bb]);
+}
+
+fn print_output_4max(input: &SolverInput, output: &SolverOutput, ranges: &FourMaxRanges) {
+    let btn = input.button_index;
+    let sb = (btn + 1) % 4;
+    let bb = (btn + 2) % 4;
+    let utg = (btn + 3) % 4;
+
+    println!("Players: 4");
+    println!(
+        "Stacks:  UTG={} BTN={} SB={} BB={}",
+        input.stacks[utg], input.stacks[btn], input.stacks[sb], input.stacks[bb]
+    );
+    println!(
+        "Blinds:  {}/{} ante={}",
+        input.small_blind, input.big_blind, input.ante
+    );
+    println!(
+        "Iterations: {}  converged={}  algorithm={}",
+        output.iterations_used,
+        output.converged,
+        input.algorithm.as_str()
+    );
+    println!();
+    println!("UTG $EV: {:.2}%", output.equities[utg] * 100.0);
+    println!("BTN $EV: {:.2}%", output.equities[btn] * 100.0);
+    println!("SB $EV:  {:.2}%", output.equities[sb] * 100.0);
+    println!("BB $EV:  {:.2}%", output.equities[bb] * 100.0);
+    println!();
+    print_range_share("UTG push", &ranges.utg_push);
+    print_range_share("BTN call vs UTG push", &ranges.btn_call_vs_push);
+    print_range_share("BTN push (UTG fold)", &ranges.btn_push);
+    print_range_share("SB call vs UTG+BTN", &ranges.sb_call_vs_utg_btn);
+    print_range_share("SB call vs UTG (BTN fold)", &ranges.sb_call_vs_utg);
+    print_range_share("SB call vs BTN (UTG fold)", &ranges.sb_call_vs_btn);
+    print_range_share("SB push (UTG+BTN fold)", &ranges.sb_push);
+    print_range_share("BB call 4-way", &ranges.bb_call_4way);
+    print_range_share("BB call vs UTG+BTN (SB fold)", &ranges.bb_call_vs_utg_btn);
+    print_range_share("BB call vs UTG+SB (BTN fold)", &ranges.bb_call_vs_utg_sb);
+    print_range_share("BB call vs UTG", &ranges.bb_call_vs_utg);
+    print_range_share("BB call vs BTN+SB", &ranges.bb_call_vs_btn_sb);
+    print_range_share("BB call vs BTN", &ranges.bb_call_vs_btn);
+    print_range_share("BB call vs SB", &ranges.bb_call_vs_sb);
 }
 
 fn print_output_3max(input: &SolverInput, output: &SolverOutput, ranges: &ThreeMaxRanges) {
@@ -525,7 +579,7 @@ Options:
   --button N
   --iterations N   (default 50)
   --tolerance X    (default 0.001)
-  --algorithm fp|cfr|cfr-3max  (default fp)
+  --algorithm fp|cfr|cfr-3max|cfr-4max  (default fp)
   --rank-cache-strict  (error on 3-way rank cache miss instead of lazy compute)
   --profile        (time 3-max EV functions for one sequential pass)
   --debug-3way     (print 3-way ICM MC convergence for AsKs/QhQd/7c7d)"

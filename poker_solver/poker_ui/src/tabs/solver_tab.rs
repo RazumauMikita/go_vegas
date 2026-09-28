@@ -299,6 +299,11 @@ impl SolverTab {
                         Algorithm::Cfr3Max,
                         algorithm_label(Algorithm::Cfr3Max),
                     );
+                    ui.selectable_value(
+                        &mut self.algorithm,
+                        Algorithm::Cfr4Max,
+                        algorithm_label(Algorithm::Cfr4Max),
+                    );
                 });
         });
         ui.label(
@@ -601,6 +606,7 @@ fn algorithm_label(algorithm: Algorithm) -> &'static str {
         Algorithm::FictitiousPlay => "Fictitious Play (fast)",
         Algorithm::Cfr => "CFR HU",
         Algorithm::Cfr3Max => "CFR 3-max",
+        Algorithm::Cfr4Max => "CFR 4-max",
     }
 }
 

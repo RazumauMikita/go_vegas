@@ -87,6 +87,27 @@ pub struct SolverOutput {
     pub hand_evs: Vec<[f64; HAND_TYPES]>,
     /// EV-дифференциалы для всех 3-max диапазонов.
     pub three_max_hand_evs: Option<ThreeMaxHandEvs>,
+    /// Диапазоны 4-max push/fold (14 info set).
+    pub four_max: Option<FourMaxRanges>,
+}
+
+/// Диапазоны 4-max push/fold. Индекс 0 в каждой паре действий — push или call.
+#[derive(Debug, Clone)]
+pub struct FourMaxRanges {
+    pub utg_push: [f64; HAND_TYPES],
+    pub btn_call_vs_push: [f64; HAND_TYPES],
+    pub btn_push: [f64; HAND_TYPES],
+    pub sb_call_vs_utg_btn: [f64; HAND_TYPES],
+    pub sb_call_vs_utg: [f64; HAND_TYPES],
+    pub sb_call_vs_btn: [f64; HAND_TYPES],
+    pub sb_push: [f64; HAND_TYPES],
+    pub bb_call_4way: [f64; HAND_TYPES],
+    pub bb_call_vs_utg_btn: [f64; HAND_TYPES],
+    pub bb_call_vs_utg_sb: [f64; HAND_TYPES],
+    pub bb_call_vs_utg: [f64; HAND_TYPES],
+    pub bb_call_vs_btn_sb: [f64; HAND_TYPES],
+    pub bb_call_vs_btn: [f64; HAND_TYPES],
+    pub bb_call_vs_sb: [f64; HAND_TYPES],
 }
 
 /// Диагностика EV колла BB (без FP, фиксированные диапазоны по combo-share).
@@ -104,7 +125,7 @@ pub fn debug_bb_report(
 ///
 /// HU (2 игрока) или 3-max (BTN/SB/BB).
 pub fn solve(input: &SolverInput, cache: &EquityCache) -> SolverOutput {
-    let players = if input.num_players == 2 || input.num_players == 3 {
+    let players = if input.num_players == 2 || input.num_players == 3 || input.num_players == 4 {
         input.num_players
     } else {
         input.stacks.len()
@@ -122,8 +143,12 @@ pub fn solve(input: &SolverInput, cache: &EquityCache) -> SolverOutput {
     match players {
         2 => algorithm::dispatch(input, cache),
         3 => match input.algorithm {
-            Algorithm::Cfr3Max => crate::algorithm::Cfr3Max::run(input, cache),
+            Algorithm::Cfr3Max | Algorithm::Cfr4Max => crate::algorithm::Cfr3Max::run(input, cache),
             _ => three_max::solve_3max(input, cache),
+        },
+        4 => match input.algorithm {
+            Algorithm::Cfr4Max => crate::algorithm::Cfr4Max::run(input, cache),
+            _ => empty_output(input.stacks.len()),
         },
         _ => empty_output(input.stacks.len()),
     }
@@ -164,6 +189,7 @@ pub(crate) fn build_hu_output(
         three_max: None,
         hand_evs,
         three_max_hand_evs: None,
+        four_max: None,
     }
 }
 
@@ -177,6 +203,7 @@ pub(crate) fn empty_output(players: usize) -> SolverOutput {
         three_max: None,
         hand_evs: vec![[0.0; HAND_TYPES]; players],
         three_max_hand_evs: None,
+        four_max: None,
     }
 }
 
