@@ -41,7 +41,7 @@ const N_BB_FPF: usize = 12;
 const N_BB_FFP: usize = 13;
 const NODES: usize = 14;
 
-const PERM4: [[usize; 4]; 24] = [
+pub(crate) const PERM4: [[usize; 4]; 24] = [
     [0, 1, 2, 3],
     [0, 1, 3, 2],
     [0, 2, 1, 3],
@@ -535,6 +535,7 @@ impl SolverAlgorithm for Cfr4Max {
                 bb_call_vs_btn: freq[N_BB_FPF],
                 bb_call_vs_sb: freq[N_BB_FFP],
             }),
+            five_max: None,
         }
     }
 }

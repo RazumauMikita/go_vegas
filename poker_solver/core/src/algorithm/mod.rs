@@ -3,11 +3,13 @@ use crate::solver::{SolverInput, SolverOutput};
 pub mod cfr;
 pub mod cfr_3max;
 pub mod cfr_4max;
+pub mod cfr_5max;
 pub mod fp;
 
 pub use cfr::CfrSolver;
 pub use cfr_3max::Cfr3Max;
 pub use cfr_4max::Cfr4Max;
+pub use cfr_5max::Cfr5Max;
 pub use fp::FictitiousPlay;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -17,6 +19,7 @@ pub enum Algorithm {
     Cfr,
     Cfr3Max,
     Cfr4Max,
+    Cfr5Max,
 }
 
 impl Algorithm {
@@ -26,6 +29,7 @@ impl Algorithm {
             Self::Cfr => "cfr",
             Self::Cfr3Max => "cfr-3max",
             Self::Cfr4Max => "cfr-4max",
+            Self::Cfr5Max => "cfr-5max",
         }
     }
 }
@@ -33,14 +37,15 @@ impl Algorithm {
 impl std::str::FromStr for Algorithm {
     type Err = String;
 
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
+    fn from_str(value: &str) -> Result<Self, String> {
         match value {
             "fp" => Ok(Self::FictitiousPlay),
             "cfr" => Ok(Self::Cfr),
             "cfr-3max" => Ok(Self::Cfr3Max),
             "cfr-4max" => Ok(Self::Cfr4Max),
+            "cfr-5max" => Ok(Self::Cfr5Max),
             other => Err(format!(
-                "unknown algorithm: {other} (expected fp, cfr, cfr-3max, or cfr-4max)"
+                "unknown algorithm: {other} (expected fp, cfr, cfr-3max, cfr-4max, or cfr-5max)"
             )),
         }
     }
@@ -65,6 +70,8 @@ pub fn run_loop<S: SolverAlgorithm>(mut solver: S, max_iterations: usize) -> Sol
 pub fn dispatch(input: &SolverInput, cache: &crate::equity_cache::EquityCache) -> SolverOutput {
     match input.algorithm {
         Algorithm::FictitiousPlay => FictitiousPlay::run(input, cache),
-        Algorithm::Cfr | Algorithm::Cfr3Max | Algorithm::Cfr4Max => CfrSolver::run(input, cache),
+        Algorithm::Cfr | Algorithm::Cfr3Max | Algorithm::Cfr4Max | Algorithm::Cfr5Max => {
+            CfrSolver::run(input, cache)
+        }
     }
 }

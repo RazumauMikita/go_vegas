@@ -36,8 +36,8 @@ pub use hh_parser::{
 };
 pub use icm::{icm_equity, icm_equity_for_player};
 pub use solver::{
-    debug_bb_report, solve, Algorithm, FourMaxRanges, SolverInput, SolverOutput, ThreeMaxHandEvs,
-    ThreeMaxRanges,
+    debug_bb_report, five_node, solve, Algorithm, FiveMaxRanges, FourMaxRanges, SolverInput,
+    SolverOutput, ThreeMaxHandEvs, ThreeMaxRanges, FIVE_MAX_NODES,
 };
 pub use three_way_rank_cache::{
     RankCacheFillStats, ThreeWayRankCache, THREE_WAY_RANK_CACHE_BYTES, THREE_WAY_RANK_CACHE_SIZE,

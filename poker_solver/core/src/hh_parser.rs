@@ -261,6 +261,15 @@ pub fn solver_position_index(position: Position, num_players: usize) -> Option<u
         (3, Position::BTN) => Some(0),
         (3, Position::SB) => Some(1),
         (3, Position::BB) => Some(2),
+        (4, Position::CO) => Some(0),
+        (4, Position::BTN) => Some(1),
+        (4, Position::SB) => Some(2),
+        (4, Position::BB) => Some(3),
+        (5, Position::HJ) => Some(0),
+        (5, Position::CO) => Some(1),
+        (5, Position::BTN) => Some(2),
+        (5, Position::SB) => Some(3),
+        (5, Position::BB) => Some(4),
         _ => None,
     }
 }

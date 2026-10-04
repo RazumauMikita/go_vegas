@@ -5,7 +5,7 @@ use std::str::FromStr;
 
 use poker_core::{
     combo_index, combo_label, equity_3way_icm, index_to_ranks, Algorithm, Card, EquityCache,
-    FourMaxRanges, SolverInput, SolverOutput, ThreeMaxRanges,
+    FiveMaxRanges, FourMaxRanges, SolverInput, SolverOutput, ThreeMaxRanges, five_node,
 };
 
 fn main() -> ExitCode {
@@ -62,6 +62,9 @@ fn run(args: Vec<String>) -> Result<(), String> {
     let elapsed = started.elapsed().as_secs_f64();
     print_output(&input, &output);
     if input.stacks.len() == 4 {
+        println!("Time: {elapsed:.2}s");
+    }
+    if input.stacks.len() == 5 {
         println!("Time: {elapsed:.2}s");
     }
 
@@ -201,8 +204,8 @@ fn parse_args(args: Vec<String>) -> Result<Config, String> {
     let payouts = payouts.ok_or_else(|| "missing --payouts".to_string())?;
     let blinds = blinds.ok_or_else(|| "missing --blinds".to_string())?;
 
-    if stacks.len() != 2 && stacks.len() != 3 && stacks.len() != 4 {
-        return Err("solver requires 2, 3, or 4 stacks".to_string());
+    if stacks.len() != 2 && stacks.len() != 3 && stacks.len() != 4 && stacks.len() != 5 {
+        return Err("solver requires 2, 3, 4, or 5 stacks".to_string());
     }
     if blinds.len() != 2 {
         return Err("--blinds requires SB,BB".to_string());
@@ -350,6 +353,12 @@ fn parse_number_list(input: &str, label: &str) -> Result<Vec<f64>, String> {
 }
 
 fn print_output(input: &SolverInput, output: &SolverOutput) {
+    if input.stacks.len() == 5 {
+        if let Some(ranges) = output.five_max.as_ref() {
+            print_output_5max(input, output, ranges);
+            return;
+        }
+    }
     if input.stacks.len() == 4 {
         if let Some(ranges) = output.four_max.as_ref() {
             print_output_4max(input, output, ranges);
@@ -401,6 +410,51 @@ fn print_output_hu(input: &SolverInput, output: &SolverOutput) {
     println!();
     println!("BB call 13x13 (A..2, suited above diagonal, offsuit below):");
     print_matrix(&output.call_ranges[bb]);
+}
+
+fn print_output_5max(input: &SolverInput, output: &SolverOutput, ranges: &FiveMaxRanges) {
+    let btn = input.button_index;
+    let sb = (btn + 1) % 5;
+    let bb = (btn + 2) % 5;
+    let hj = (btn + 3) % 5;
+    let co = (btn + 4) % 5;
+
+    println!("Players: 5");
+    println!(
+        "Stacks:  HJ={} CO={} BTN={} SB={} BB={}",
+        input.stacks[hj], input.stacks[co], input.stacks[btn], input.stacks[sb], input.stacks[bb]
+    );
+    println!(
+        "Blinds:  {}/{} ante={}",
+        input.small_blind, input.big_blind, input.ante
+    );
+    println!(
+        "Iterations: {}  converged={}  algorithm={}",
+        output.iterations_used,
+        output.converged,
+        input.algorithm.as_str()
+    );
+    println!();
+    println!("HJ $EV:  {:.2}%", output.equities[hj] * 100.0);
+    println!("CO $EV:  {:.2}%", output.equities[co] * 100.0);
+    println!("BTN $EV: {:.2}%", output.equities[btn] * 100.0);
+    println!("SB $EV:  {:.2}%", output.equities[sb] * 100.0);
+    println!("BB $EV:  {:.2}%", output.equities[bb] * 100.0);
+    println!();
+    print_range_share("HJ push", &ranges.freq[five_node(0, 0)]);
+    print_range_share("CO call vs HJ", &ranges.freq[five_node(1, 1)]);
+    print_range_share("BTN call vs HJ", &ranges.freq[five_node(2, 1)]);
+    print_range_share("SB call vs HJ", &ranges.freq[five_node(3, 1)]);
+    print_range_share("BB call vs HJ", &ranges.freq[five_node(4, 1)]);
+    print_range_share("CO push (HJ fold)", &ranges.freq[five_node(1, 0)]);
+    print_range_share("BTN call vs CO", &ranges.freq[five_node(2, 2)]);
+    print_range_share("SB call vs CO", &ranges.freq[five_node(3, 2)]);
+    print_range_share("BB call vs CO", &ranges.freq[five_node(4, 2)]);
+    print_range_share("BTN push (folds)", &ranges.freq[five_node(2, 0)]);
+    print_range_share("SB call vs BTN", &ranges.freq[five_node(3, 4)]);
+    print_range_share("BB call vs BTN", &ranges.freq[five_node(4, 4)]);
+    print_range_share("SB push (folds)", &ranges.freq[five_node(3, 0)]);
+    print_range_share("BB call vs SB", &ranges.freq[five_node(4, 8)]);
 }
 
 fn print_output_4max(input: &SolverInput, output: &SolverOutput, ranges: &FourMaxRanges) {
@@ -579,7 +633,7 @@ Options:
   --button N
   --iterations N   (default 50)
   --tolerance X    (default 0.001)
-  --algorithm fp|cfr|cfr-3max|cfr-4max  (default fp)
+  --algorithm fp|cfr|cfr-3max|cfr-4max|cfr-5max  (default fp)
   --rank-cache-strict  (error on 3-way rank cache miss instead of lazy compute)
   --profile        (time 3-max EV functions for one sequential pass)
   --debug-3way     (print 3-way ICM MC convergence for AsKs/QhQd/7c7d)"
