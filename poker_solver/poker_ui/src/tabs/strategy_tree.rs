@@ -1,5 +1,5 @@
 use egui::{Color32, RichText, Ui};
-use poker_core::{SolverOutput, ThreeMaxHandEvs, ThreeMaxRanges};
+use poker_core::{FourMaxRanges, SolverOutput, ThreeMaxHandEvs, ThreeMaxRanges};
 
 use crate::widgets::combo_share;
 
@@ -23,8 +23,10 @@ pub struct TreeNode {
 
 pub type NodePath = Vec<usize>;
 
-pub fn build_strategy_tree(output: &SolverOutput) -> Vec<TreeNode> {
-    if let Some(ranges) = output.three_max.as_ref() {
+pub fn build_strategy_tree(output: &SolverOutput, button_index: usize) -> Vec<TreeNode> {
+    if let Some(ranges) = output.four_max.as_ref() {
+        build_4max_tree(ranges, output, button_index)
+    } else if let Some(ranges) = output.three_max.as_ref() {
         let hand_evs = output.three_max_hand_evs.as_ref();
         build_3max_tree(ranges, hand_evs)
     } else {
@@ -177,6 +179,130 @@ fn build_3max_tree(ranges: &ThreeMaxRanges, hand_evs: Option<&ThreeMaxHandEvs>) 
                 Action::Call,
                 ranges.bb_call_vs_sb,
                 evs.map(|e| e.bb_call_vs_sb),
+                vec![],
+            )],
+        ),
+    ]
+}
+
+fn four_max_seat(button_index: usize, role: usize) -> usize {
+    let button = button_index % 4;
+    match role {
+        0 => (button + 3) % 4,
+        1 => button,
+        2 => (button + 1) % 4,
+        _ => (button + 2) % 4,
+    }
+}
+
+fn seat_hand_ev(output: &SolverOutput, button_index: usize, role: usize) -> Option<[f64; 169]> {
+    output
+        .hand_evs
+        .get(four_max_seat(button_index, role))
+        .copied()
+}
+
+fn build_4max_tree(
+    ranges: &FourMaxRanges,
+    output: &SolverOutput,
+    button_index: usize,
+) -> Vec<TreeNode> {
+    let ev = |role: usize| seat_hand_ev(output, button_index, role);
+    vec![
+        make_node(
+            "CO push",
+            Action::Raise,
+            ranges.utg_push,
+            ev(0),
+            vec![
+                make_node(
+                    "BTN call (vs CO)",
+                    Action::Call,
+                    ranges.btn_call_vs_push,
+                    None,
+                    vec![
+                        make_node(
+                            "SB call (vs CO+BTN)",
+                            Action::Call,
+                            ranges.sb_call_vs_utg_btn,
+                            None,
+                            vec![make_node(
+                                "BB call (4-way)",
+                                Action::CallSpecial,
+                                ranges.bb_call_4way,
+                                ev(3),
+                                vec![],
+                            )],
+                        ),
+                        make_node(
+                            "BB call (vs CO+BTN)",
+                            Action::Call,
+                            ranges.bb_call_vs_utg_btn,
+                            None,
+                            vec![],
+                        ),
+                    ],
+                ),
+                make_node(
+                    "SB call (vs CO)",
+                    Action::Call,
+                    ranges.sb_call_vs_utg,
+                    None,
+                    vec![make_node(
+                        "BB call (vs CO+SB)",
+                        Action::Call,
+                        ranges.bb_call_vs_utg_sb,
+                        None,
+                        vec![],
+                    )],
+                ),
+                make_node(
+                    "BB call (vs CO)",
+                    Action::Call,
+                    ranges.bb_call_vs_utg,
+                    None,
+                    vec![],
+                ),
+            ],
+        ),
+        make_node(
+            "BTN push (CO fold)",
+            Action::Raise,
+            ranges.btn_push,
+            ev(1),
+            vec![
+                make_node(
+                    "SB call (vs BTN)",
+                    Action::Call,
+                    ranges.sb_call_vs_btn,
+                    None,
+                    vec![make_node(
+                        "BB call (vs BTN+SB)",
+                        Action::CallSpecial,
+                        ranges.bb_call_vs_btn_sb,
+                        None,
+                        vec![],
+                    )],
+                ),
+                make_node(
+                    "BB call (vs BTN)",
+                    Action::Call,
+                    ranges.bb_call_vs_btn,
+                    None,
+                    vec![],
+                ),
+            ],
+        ),
+        make_node(
+            "SB push (CO+BTN fold)",
+            Action::Raise,
+            ranges.sb_push,
+            ev(2),
+            vec![make_node(
+                "BB call (vs SB)",
+                Action::Call,
+                ranges.bb_call_vs_sb,
+                None,
                 vec![],
             )],
         ),

@@ -411,7 +411,7 @@ fn print_output_4max(input: &SolverInput, output: &SolverOutput, ranges: &FourMa
 
     println!("Players: 4");
     println!(
-        "Stacks:  UTG={} BTN={} SB={} BB={}",
+        "Stacks:  CO={} BTN={} SB={} BB={}",
         input.stacks[utg], input.stacks[btn], input.stacks[sb], input.stacks[bb]
     );
     println!(
@@ -425,22 +425,22 @@ fn print_output_4max(input: &SolverInput, output: &SolverOutput, ranges: &FourMa
         input.algorithm.as_str()
     );
     println!();
-    println!("UTG $EV: {:.2}%", output.equities[utg] * 100.0);
+    println!("CO $EV:  {:.2}%", output.equities[utg] * 100.0);
     println!("BTN $EV: {:.2}%", output.equities[btn] * 100.0);
     println!("SB $EV:  {:.2}%", output.equities[sb] * 100.0);
     println!("BB $EV:  {:.2}%", output.equities[bb] * 100.0);
     println!();
-    print_range_share("UTG push", &ranges.utg_push);
-    print_range_share("BTN call vs UTG push", &ranges.btn_call_vs_push);
-    print_range_share("BTN push (UTG fold)", &ranges.btn_push);
-    print_range_share("SB call vs UTG+BTN", &ranges.sb_call_vs_utg_btn);
-    print_range_share("SB call vs UTG (BTN fold)", &ranges.sb_call_vs_utg);
-    print_range_share("SB call vs BTN (UTG fold)", &ranges.sb_call_vs_btn);
-    print_range_share("SB push (UTG+BTN fold)", &ranges.sb_push);
+    print_range_share("CO push", &ranges.utg_push);
+    print_range_share("BTN call vs CO push", &ranges.btn_call_vs_push);
+    print_range_share("BTN push (CO fold)", &ranges.btn_push);
+    print_range_share("SB call vs CO+BTN", &ranges.sb_call_vs_utg_btn);
+    print_range_share("SB call vs CO (BTN fold)", &ranges.sb_call_vs_utg);
+    print_range_share("SB call vs BTN (CO fold)", &ranges.sb_call_vs_btn);
+    print_range_share("SB push (CO+BTN fold)", &ranges.sb_push);
     print_range_share("BB call 4-way", &ranges.bb_call_4way);
-    print_range_share("BB call vs UTG+BTN (SB fold)", &ranges.bb_call_vs_utg_btn);
-    print_range_share("BB call vs UTG+SB (BTN fold)", &ranges.bb_call_vs_utg_sb);
-    print_range_share("BB call vs UTG", &ranges.bb_call_vs_utg);
+    print_range_share("BB call vs CO+BTN (SB fold)", &ranges.bb_call_vs_utg_btn);
+    print_range_share("BB call vs CO+SB (BTN fold)", &ranges.bb_call_vs_utg_sb);
+    print_range_share("BB call vs CO", &ranges.bb_call_vs_utg);
     print_range_share("BB call vs BTN+SB", &ranges.bb_call_vs_btn_sb);
     print_range_share("BB call vs BTN", &ranges.bb_call_vs_btn);
     print_range_share("BB call vs SB", &ranges.bb_call_vs_sb);

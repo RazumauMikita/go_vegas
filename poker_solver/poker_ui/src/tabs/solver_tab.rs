@@ -89,10 +89,19 @@ impl SolverTab {
             });
 
         if self.result.is_some() && !self.tree.is_empty() {
+            let four_max = self
+                .result
+                .as_ref()
+                .is_some_and(|result| result.output.four_max.is_some());
+            let (default_width, min_width, max_width) = if four_max {
+                (460.0, 380.0, 640.0)
+            } else {
+                (300.0, 280.0, 360.0)
+            };
             egui::SidePanel::left("strategy_tree_panel")
                 .resizable(true)
-                .default_width(300.0)
-                .width_range(280.0..=360.0)
+                .default_width(default_width)
+                .width_range(min_width..=max_width)
                 .show(ctx, |ui| {
                     ui.heading("Strategy Tree");
                     ui.separator();
@@ -120,7 +129,7 @@ impl SolverTab {
         if let Some(rx) = &self.worker_rx {
             match rx.try_recv() {
                 Ok(SolverWorkerMessage::Done(result)) => {
-                    self.tree = build_strategy_tree(&result.output);
+                    self.tree = build_strategy_tree(&result.output, result.input.button_index);
                     self.selected_path = if self.tree.is_empty() {
                         None
                     } else {
@@ -198,6 +207,9 @@ impl SolverTab {
             if ui.selectable_label(self.player_count == 3, "3").clicked() {
                 self.set_player_count(3);
             }
+            if ui.selectable_label(self.player_count == 4, "4").clicked() {
+                self.set_player_count(4);
+            }
         });
 
         let bb = self
@@ -216,8 +228,8 @@ impl SolverTab {
                     .spacing(egui::vec2(6.0, 4.0))
                     .show(ui, |ui| {
                         ui.label("Position");
-                        ui.label("Stack");
-                        ui.label("Stack BB");
+                        ui.label("Stack (chips)");
+                        ui.label("Stack (BB)");
                         ui.end_row();
 
                         for index in 0..self.player_count {
@@ -250,7 +262,10 @@ impl SolverTab {
 
                         for index in 0..self.prize_percents.len() {
                             ui.label(format!("{}", index + 1));
-                            ui.text_edit_singleline(&mut self.prize_percents[index]);
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.prize_percents[index])
+                                    .hint_text("нет"),
+                            );
                             ui.end_row();
                         }
                     });
@@ -307,12 +322,18 @@ impl SolverTab {
                 });
         });
         ui.label(
-            RichText::new("FP: быстро, ±2%. CFR: 30 итераций, ±1% (HU) / ±1.5% (3-max).")
+            RichText::new(
+                "FP: быстро, ±2%. CFR: 30 итераций, ±1% (HU) / ±1.5% (3-max). 4-max считает только CFR 4-max.",
+            )
                 .small()
                 .weak(),
         );
 
         if let Some(pool_size) = self.parse_prize_sum() {
+            let has_blank_prize = self
+                .prize_percents
+                .iter()
+                .any(|text| text.trim().is_empty());
             if pool_size > 1.0 + 1e-6 {
                 ui.colored_label(
                     egui::Color32::RED,
@@ -321,6 +342,8 @@ impl SolverTab {
                         pool_size
                     ),
                 );
+            } else if has_blank_prize {
+                ui.label(RichText::new("Пустые места без приза.").small().weak());
             } else if pool_size < 1.0 - 1e-6 {
                 ui.label(format!(
                     "Pool size: {pool_size:.2} ({:.1}% уже разыграно — например, 3-м местом)",
@@ -363,6 +386,16 @@ impl SolverTab {
             ))
             .small(),
         );
+        if result.input.stacks.len() == 4 {
+            let ev_line = (0..4)
+                .map(|index| {
+                    let equity = result.output.equities.get(index).copied().unwrap_or(0.0);
+                    format!("{} {:.1}%", position_label(4, index), equity * 100.0)
+                })
+                .collect::<Vec<_>>()
+                .join("  ");
+            ui.label(RichText::new(format!("$EV: {ev_line}")).strong());
+        }
         ui.add_space(8.0);
 
         let path = self.selected_path.clone().or_else(|| {
@@ -400,6 +433,9 @@ impl SolverTab {
     }
 
     fn set_player_count(&mut self, count: usize) {
+        if count == self.player_count {
+            return;
+        }
         self.player_count = count;
         while self.stack_chips.len() < count {
             self.stack_chips.push("1000".to_string());
@@ -414,6 +450,8 @@ impl SolverTab {
             };
             if self.prize_percents.is_empty() {
                 self.prize_percents = default;
+            } else if count == 4 {
+                self.prize_percents.push(String::new());
             } else {
                 self.prize_percents.push("0".to_string());
             }
@@ -474,18 +512,11 @@ impl SolverTab {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        if stacks.len() != 2 && stacks.len() != 3 {
-            return Err("солвер поддерживает 2 или 3 игрока".to_string());
+        if stacks.len() != 2 && stacks.len() != 3 && stacks.len() != 4 {
+            return Err("солвер поддерживает 2, 3 или 4 игрока".to_string());
         }
 
-        let mut payouts = Vec::with_capacity(self.prize_percents.len());
-        for (index, text) in self.prize_percents.iter().enumerate() {
-            let value = text
-                .trim()
-                .parse::<f64>()
-                .map_err(|_| format!("некорректный приз для места {}", index + 1))?;
-            payouts.push(value / 100.0);
-        }
+        let payouts = parse_prize_payouts(&self.prize_percents)?;
 
         let prize_sum: f64 = payouts.iter().sum();
         if prize_sum > 1.0 + 1e-6 {
@@ -535,7 +566,7 @@ impl SolverTab {
             small_blind,
             big_blind,
             ante,
-            button_index: 0,
+            button_index: if self.player_count == 4 { 1 } else { 0 },
             max_iterations,
             tolerance,
             num_players: self.player_count,
@@ -548,11 +579,17 @@ impl SolverTab {
 
     fn parse_prize_sum(&self) -> Option<f64> {
         let mut sum = 0.0;
+        let mut any = false;
         for text in &self.prize_percents {
-            let value = text.trim().parse::<f64>().ok()? / 100.0;
+            let text = text.trim();
+            if text.is_empty() {
+                continue;
+            }
+            let value = text.parse::<f64>().ok()? / 100.0;
             sum += value;
+            any = true;
         }
-        Some(sum)
+        any.then_some(sum)
     }
 
     fn show_outline_table(&self, ui: &mut Ui, result: &SolverResult) {
@@ -612,6 +649,7 @@ fn algorithm_label(algorithm: Algorithm) -> &'static str {
 
 fn resolve_algorithm(selected: Algorithm, player_count: usize) -> Algorithm {
     match (selected, player_count) {
+        (_, 4) => Algorithm::Cfr4Max,
         (Algorithm::FictitiousPlay, _) => Algorithm::FictitiousPlay,
         (Algorithm::Cfr, 3) => Algorithm::Cfr3Max,
         (Algorithm::Cfr3Max, 2) => Algorithm::Cfr,
@@ -639,18 +677,42 @@ fn right_label(ui: &mut Ui, text: &str) {
 }
 
 fn position_label(players: usize, index: usize) -> &'static str {
-    if players == 2 {
-        match index {
-            0 => "SB",
-            _ => "BB",
-        }
-    } else {
-        match index {
-            0 => "BTN",
-            1 => "SB",
-            _ => "BB",
-        }
+    match (players, index) {
+        (2, 0) => "SB",
+        (2, _) => "BB",
+        (4, 0) => "CO",
+        (4, 1) => "BTN",
+        (4, 2) => "SB",
+        (4, _) => "BB",
+        (_, 0) => "BTN",
+        (_, 1) => "SB",
+        (_, _) => "BB",
     }
+}
+
+fn parse_prize_payouts(prize_percents: &[String]) -> Result<Vec<f64>, String> {
+    let mut payouts = Vec::with_capacity(prize_percents.len());
+    for (index, text) in prize_percents.iter().enumerate() {
+        let text = text.trim();
+        if text.is_empty() {
+            payouts.push(None);
+            continue;
+        }
+        let value = text
+            .parse::<f64>()
+            .map_err(|_| format!("некорректный приз для места {}", index + 1))?;
+        payouts.push(Some(value / 100.0));
+    }
+    while payouts.last().is_some_and(|prize| prize.is_none()) {
+        payouts.pop();
+    }
+    if payouts.is_empty() {
+        return Err("укажите приз хотя бы за 1 место".to_string());
+    }
+    Ok(payouts
+        .into_iter()
+        .map(|prize| prize.unwrap_or(0.0))
+        .collect())
 }
 
 fn normalize_payouts(payouts: &[f64]) -> Vec<f64> {
@@ -679,6 +741,17 @@ fn outline_range_shares(output: &SolverOutput, players: usize) -> Vec<f64> {
         ];
     }
 
+    if players == 4 {
+        if let Some(ranges) = output.four_max.as_ref() {
+            return vec![
+                combo_share(&ranges.utg_push),
+                combo_share(&ranges.btn_push),
+                combo_share(&ranges.sb_push),
+                combo_share(&ranges.bb_call_vs_sb),
+            ];
+        }
+    }
+
     vec![0.0; players]
 }
 
@@ -704,6 +777,43 @@ mod tests {
         assert_eq!(resolve_algorithm(Algorithm::Cfr3Max, 2), Algorithm::Cfr);
         assert_eq!(resolve_algorithm(Algorithm::Cfr, 3), Algorithm::Cfr3Max);
         assert_eq!(resolve_algorithm(Algorithm::Cfr3Max, 3), Algorithm::Cfr3Max);
+        assert_eq!(
+            resolve_algorithm(Algorithm::FictitiousPlay, 4),
+            Algorithm::Cfr4Max
+        );
+        assert_eq!(resolve_algorithm(Algorithm::Cfr4Max, 4), Algorithm::Cfr4Max);
+    }
+
+    #[test]
+    fn parse_solver_input_blank_places_have_no_prize() {
+        let mut tab = SolverTab::default();
+        tab.set_player_count(4);
+        tab.prize_percents = vec![
+            "40".to_string(),
+            "30".to_string(),
+            String::new(),
+            String::new(),
+        ];
+        let input = tab.parse_input().expect("blank 3rd and 4th");
+        assert_eq!(input.payouts, vec![0.4, 0.3]);
+
+        tab.prize_percents = vec![
+            "100".to_string(),
+            String::new(),
+            String::new(),
+            String::new(),
+        ];
+        let input = tab.parse_input().expect("only 1st place");
+        assert_eq!(input.payouts, vec![1.0]);
+
+        tab.prize_percents = vec![
+            "40".to_string(),
+            String::new(),
+            "20".to_string(),
+            String::new(),
+        ];
+        let input = tab.parse_input().expect("blank 2nd keeps later place");
+        assert_eq!(input.payouts, vec![0.4, 0.0, 0.2]);
     }
 
     #[test]

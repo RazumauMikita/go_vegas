@@ -12,12 +12,13 @@ use crate::equity_3way::{apply_permutation, RANK_PERMUTATIONS as PERM3};
 use crate::equity_cache::{expand_combo, EquityCache};
 use crate::four_way_rank_cache::FourWayRankCache;
 use crate::solver::{
-    empty_output, tournament_equity, SolverInput, SolverOutput, FourMaxRanges, HAND_EV_SCALE,
+    empty_output, tournament_equity, FourMaxRanges, SolverInput, SolverOutput, HAND_EV_SCALE,
     HAND_TYPES,
 };
 use crate::three_way_rank_cache::ThreeWayRankCache;
 
 const DEFAULT_TOLERANCE: f64 = 0.005;
+const MIN_CONVERGENCE_ITERS: usize = 200;
 const DCFR_ALPHA: f64 = 1.5;
 const DCFR_BETA: f64 = 0.5;
 const DCFR_GAMMA: f64 = 1.0;
@@ -126,11 +127,13 @@ struct Terminals {
 
 struct Shared {
     equity: Vec<f32>,
+    #[cfg_attr(not(test), allow(dead_code))]
     masks: [u64; HAND_TYPES],
     #[cfg_attr(not(test), allow(dead_code))]
     cards: [[Card; 2]; HAND_TYPES],
     combos: [f64; HAND_TYPES],
-    unblock: Vec<[u8; HAND_TYPES]>,
+    unblock: Vec<Vec<[u8; HAND_TYPES]>>,
+    block: [[bool; HAND_TYPES]; HAND_TYPES],
     bucket: [u8; HAND_TYPES],
     bucket_mask: [u64; BUCKETS],
     #[cfg_attr(not(test), allow(dead_code))]
@@ -395,18 +398,21 @@ impl SolverAlgorithm for Cfr4Max {
         let freq = self.frequencies();
         let opp = opponent_reach(&freq);
         let terminals = self.model.terminals(&freq);
+        let utg_fold = fold_freq(&freq[N_UTG]);
         let t = (self.iterations_done + 1) as f64;
 
         for node in 0..NODES {
             for hand in 0..HAND_TYPES {
-                let ev = action_ev(node, hand, &opp, &terminals);
+                let ev = action_ev(node, hand, &opp, &freq, &terminals, &self.model, &utg_fold);
                 let sigma = self.strategy_of(node, hand);
                 let reach = reach_of(node, hand, &opp);
                 dcfr(self.regret_mut(node), hand, ev, sigma, reach, t);
             }
         }
 
-        self.accumulate(&freq, t);
+        if t > 1.0 {
+            self.accumulate(&freq, t);
+        }
         self.iterations_done += 1;
 
         let averaged = self.average_freq();
@@ -423,7 +429,9 @@ impl SolverAlgorithm for Cfr4Max {
 
         let n = (NODES * HAND_TYPES) as f64;
         let tol = self.tolerance();
-        if self.iterations_done >= 2 && (last_change / n < tol || avg_change / n < tol) {
+        if self.iterations_done >= MIN_CONVERGENCE_ITERS
+            && (last_change / n < tol || avg_change / n < tol)
+        {
             self.has_converged = true;
         }
 
@@ -444,10 +452,12 @@ impl SolverAlgorithm for Cfr4Max {
         let freq = self.average_freq();
         let opp = opponent_reach(&freq);
         let terminals = self.model.terminals(&freq);
+        let utg_fold = fold_freq(&freq[N_UTG]);
         let mut evs = [[(0.0, 0.0); HAND_TYPES]; NODES];
         for node in 0..NODES {
             for hand in 0..HAND_TYPES {
-                evs[node][hand] = action_ev(node, hand, &opp, &terminals);
+                evs[node][hand] =
+                    action_ev(node, hand, &opp, &freq, &terminals, &self.model, &utg_fold);
             }
         }
 
@@ -482,10 +492,22 @@ impl SolverAlgorithm for Cfr4Max {
             hand_evs[seats[3]][hand] = diff(evs[N_BB_4][hand]);
         }
 
+        let last = self.frequencies();
         let elapsed = self.solve_started.elapsed().as_secs_f64();
         eprintln!(
             "4-max CFR: iterations={} converged={} time={elapsed:.2}s",
             self.iterations_done, self.has_converged
+        );
+        eprintln!(
+            "4-max ranges last/avg: CO {:.1}/{:.1} BTNpush {:.1}/{:.1} SBpush {:.1}/{:.1} BBvsSB {:.1}/{:.1}",
+            combo_share(&last[N_UTG]) * 100.0,
+            combo_share(&freq[N_UTG]) * 100.0,
+            combo_share(&last[N_BTN_PUSH]) * 100.0,
+            combo_share(&freq[N_BTN_PUSH]) * 100.0,
+            combo_share(&last[N_SB_FF]) * 100.0,
+            combo_share(&freq[N_SB_FF]) * 100.0,
+            combo_share(&last[N_BB_FFP]) * 100.0,
+            combo_share(&freq[N_BB_FFP]) * 100.0,
         );
 
         SolverOutput {
@@ -519,6 +541,21 @@ impl SolverAlgorithm for Cfr4Max {
 
 fn diff(ev: (f64, f64)) -> f64 {
     (ev.0 - ev.1) * HAND_EV_SCALE
+}
+
+fn combo_share(range: &[f64; HAND_TYPES]) -> f64 {
+    let shared = shared_cards();
+    let mut weighted = 0.0;
+    let mut total = 0.0;
+    for h in 0..HAND_TYPES {
+        total += shared.combos[h];
+        weighted += shared.combos[h] * range[h].clamp(0.0, 1.0);
+    }
+    if total > 0.0 {
+        weighted / total
+    } else {
+        0.0
+    }
 }
 
 fn dcfr(
@@ -556,22 +593,27 @@ fn opponent_reach(freq: &[[f64; HAND_TYPES]; NODES]) -> [[f64; HAND_TYPES]; NODE
 }
 
 fn p_action(hero: usize, freq: &[f64; HAND_TYPES], shared: &Shared) -> f64 {
-    let hero_mask = shared.masks[hero];
     let mut live = 0.0;
     let mut acted = 0.0;
-    for opp in 0..HAND_TYPES {
-        if shared.masks[opp] & hero_mask != 0 {
-            continue;
+    for unblocked in &shared.unblock[hero] {
+        for (opp, &count) in unblocked.iter().enumerate() {
+            let w = f64::from(count);
+            if w == 0.0 {
+                continue;
+            }
+            live += w;
+            acted += w * freq[opp].clamp(0.0, 1.0);
         }
-        let w = shared.combos[opp];
-        live += w;
-        acted += w * freq[opp].clamp(0.0, 1.0);
     }
     if live <= 0.0 {
         0.0
     } else {
         acted / live
     }
+}
+
+fn types_block(a: usize, b: usize, shared: &Shared) -> bool {
+    shared.block[a][b]
 }
 
 fn reach_of(node: usize, hand: usize, opp: &[[f64; HAND_TYPES]; NODES]) -> f64 {
@@ -598,7 +640,10 @@ fn action_ev(
     node: usize,
     h: usize,
     opp: &[[f64; HAND_TYPES]; NODES],
+    freq: &[[f64; HAND_TYPES]; NODES],
     t: &Terminals,
+    model: &Model,
+    utg_fold: &[f64; HAND_TYPES],
 ) -> (f64, f64) {
     let p = |n: usize| opp[n][h];
     let mix = |prob: f64, a: f64, b: f64| prob * a + (1.0 - prob) * b;
@@ -624,13 +669,7 @@ fn action_ev(
                 + (1.0 - p(N_SB_PF)) * mix(p(N_BB_PFF), t.hu[3][1][h], t.walk[0][1]);
             (call, fold)
         }
-        N_BTN_PUSH => {
-            let push = p(N_SB_FP) * mix(p(N_BB_FPC), t.three[3][1][h], t.hu[2][1][h])
-                + (1.0 - p(N_SB_FP)) * mix(p(N_BB_FPF), t.hu[1][1][h], t.walk[1][1]);
-            let fold = p(N_SB_FF) * mix(p(N_BB_FFP), t.hu[0][1][h], t.walk[2][1])
-                + (1.0 - p(N_SB_FF)) * t.walk[3][1];
-            (push, fold)
-        }
+        N_BTN_PUSH => btn_push_ev(h, freq, t, model, utg_fold),
         N_SB_PC => (
             mix(p(N_BB_4), t.four[2][h], t.three[0][2][h]),
             mix(p(N_BB_PCF), t.three[1][2][h], t.hu[5][2][h]),
@@ -643,10 +682,7 @@ fn action_ev(
             mix(p(N_BB_FPC), t.three[3][2][h], t.hu[2][2][h]),
             mix(p(N_BB_FPF), t.hu[1][2][h], t.walk[1][2]),
         ),
-        N_SB_FF => (
-            mix(p(N_BB_FFP), t.hu[0][2][h], t.walk[2][2]),
-            t.walk[3][2],
-        ),
+        N_SB_FF => (mix(p(N_BB_FFP), t.hu[0][2][h], t.walk[2][2]), t.walk[3][2]),
         N_BB_4 => (t.four[3][h], t.three[0][3][h]),
         N_BB_PCF => (t.three[1][3][h], t.hu[5][3][h]),
         N_BB_PFC => (t.three[2][3][h], t.hu[4][3][h]),
@@ -655,6 +691,171 @@ fn action_ev(
         N_BB_FPF => (t.hu[1][3][h], t.walk[1][3]),
         _ => (t.hu[0][3][h], t.walk[2][3]),
     }
+}
+
+fn fold_freq(push: &[f64; HAND_TYPES]) -> [f64; HAND_TYPES] {
+    let mut fold = [0.0; HAND_TYPES];
+    for h in 0..HAND_TYPES {
+        fold[h] = 1.0 - push[h].clamp(0.0, 1.0);
+    }
+    fold
+}
+
+fn avg_remaining() -> &'static Vec<[f64; HAND_TYPES]> {
+    static AVG: OnceLock<Vec<[f64; HAND_TYPES]>> = OnceLock::new();
+    AVG.get_or_init(|| {
+        let shared = shared_cards();
+        let mut avg = vec![[0.0; HAND_TYPES]; HAND_TYPES];
+        for u in 0..HAND_TYPES {
+            let rows = &shared.unblock[u];
+            let n = rows.len().max(1) as f64;
+            for row in rows {
+                for s in 0..HAND_TYPES {
+                    avg[u][s] += f64::from(row[s]);
+                }
+            }
+            for s in 0..HAND_TYPES {
+                avg[u][s] /= n;
+            }
+        }
+        avg
+    })
+}
+
+fn reweight_after_fold(
+    row: &[f64; HAND_TYPES],
+    fold: &[f64; HAND_TYPES],
+    avg_live: &[[f64; HAND_TYPES]],
+    combos: &[f64; HAND_TYPES],
+) -> [f64; HAND_TYPES] {
+    let mut p_u = [0.0; HAND_TYPES];
+    let mut z = 0.0;
+    for u in 0..HAND_TYPES {
+        let w = row[u] * fold[u];
+        p_u[u] = w;
+        z += w;
+    }
+    if z <= 0.0 {
+        return *row;
+    }
+    let mut out = [0.0; HAND_TYPES];
+    for s in 0..HAND_TYPES {
+        let base = row[s];
+        if base <= 0.0 || combos[s] <= 0.0 {
+            continue;
+        }
+        let mut factor = 0.0;
+        for (u, &pu) in p_u.iter().enumerate() {
+            if pu == 0.0 {
+                continue;
+            }
+            factor += pu * (avg_live[u][s] / combos[s]);
+        }
+        out[s] = base * (factor / z);
+    }
+    out
+}
+
+fn btn_push_ev(
+    h: usize,
+    freq: &[[f64; HAND_TYPES]; NODES],
+    t: &Terminals,
+    model: &Model,
+    utg_fold: &[f64; HAND_TYPES],
+) -> (f64, f64) {
+    let shared = shared_cards();
+    let rows = &shared.unblock[h];
+    if rows.is_empty() {
+        return (t.walk[1][1], t.walk[2][1]);
+    }
+
+    let steal = t.walk[1][1];
+    let sb_takes = t.walk[2][1];
+    let bb_walk = t.walk[3][1];
+    let three = t.three[3][1][h];
+    let spec = t.hu[0][1][h];
+    let btn_win_vs_bb = model.hu_win[1][0][1];
+    let btn_lose_vs_bb = model.hu_win[1][1][1];
+    let btn_win_vs_sb = model.hu_win[2][0][1];
+    let btn_lose_vs_sb = model.hu_win[2][1][1];
+    let avg_live = avg_remaining();
+
+    let mut mean = [0.0; HAND_TYPES];
+    for row in rows {
+        for (s, slot) in mean.iter_mut().enumerate() {
+            *slot += f64::from(row[s]);
+        }
+    }
+    let n = rows.len() as f64;
+    for slot in mean.iter_mut() {
+        *slot /= n;
+    }
+    let live = reweight_after_fold(&mean, utg_fold, avg_live, &shared.combos);
+    let p_sb_call = row_p_w(&live, &freq[N_SB_FP]);
+    let p_bb_both = row_p_w(&live, &freq[N_BB_FPC]);
+    let p_bb_vs_btn = row_p_w(&live, &freq[N_BB_FPF]);
+    let p_sb_shove = row_p_w(&live, &freq[N_SB_FF]);
+    let p_bb_vs_sb = row_p_w(&live, &freq[N_BB_FFP]);
+    let hu_bb = row_hu_w(
+        h,
+        &live,
+        &freq[N_BB_FPF],
+        btn_win_vs_bb,
+        btn_lose_vs_bb,
+        shared,
+    );
+    let hu_sb = row_hu_w(
+        h,
+        &live,
+        &freq[N_SB_FP],
+        btn_win_vs_sb,
+        btn_lose_vs_sb,
+        shared,
+    );
+    let mix = |prob: f64, a: f64, b: f64| prob * a + (1.0 - prob) * b;
+    let push = p_sb_call * mix(p_bb_both, three, hu_sb)
+        + (1.0 - p_sb_call) * mix(p_bb_vs_btn, hu_bb, steal);
+    let fold = p_sb_shove * mix(p_bb_vs_sb, spec, sb_takes) + (1.0 - p_sb_shove) * bb_walk;
+    (push, fold)
+}
+
+fn row_p_w(row: &[f64; HAND_TYPES], freq: &[f64; HAND_TYPES]) -> f64 {
+    let mut live = 0.0;
+    let mut acted = 0.0;
+    for (opp, &w) in row.iter().enumerate() {
+        if w <= 0.0 {
+            continue;
+        }
+        live += w;
+        acted += w * freq[opp].clamp(0.0, 1.0);
+    }
+    if live <= 0.0 {
+        0.0
+    } else {
+        acted / live
+    }
+}
+
+fn row_hu_w(
+    hero: usize,
+    row: &[f64; HAND_TYPES],
+    villain: &[f64; HAND_TYPES],
+    icm_win: f64,
+    icm_lose: f64,
+    shared: &Shared,
+) -> f64 {
+    let mut weight = 0.0;
+    let mut equity = 0.0;
+    for v in 0..HAND_TYPES {
+        let live = row[v] * villain[v].clamp(0.0, 1.0);
+        if live <= 0.0 {
+            continue;
+        }
+        weight += live;
+        equity += live * f64::from(shared.equity[hero * HAND_TYPES + v]);
+    }
+    let p = if weight > 0.0 { equity / weight } else { 0.5 };
+    p * icm_win + (1.0 - p) * icm_lose
 }
 
 fn game_ev(
@@ -679,8 +880,7 @@ fn game_ev(
             p(N_UTG) * after_push + (1.0 - p(N_UTG)) * after_fold
         }
         2 => {
-            p(N_UTG)
-                * (p(N_BTN_CALL) * mix(N_SB_PC) + (1.0 - p(N_BTN_CALL)) * mix(N_SB_PF))
+            p(N_UTG) * (p(N_BTN_CALL) * mix(N_SB_PC) + (1.0 - p(N_BTN_CALL)) * mix(N_SB_PF))
                 + (1.0 - p(N_UTG))
                     * (p(N_BTN_PUSH) * mix(N_SB_FP) + (1.0 - p(N_BTN_PUSH)) * mix(N_SB_FF))
         }
@@ -764,10 +964,7 @@ impl Model {
         let (contested, uncalled) = effective4(base);
         let mut four_icm = [[0.0; 4]; 24];
         for perm in 0..24 {
-            four_icm[perm] = icm4(
-                &apply_permutation_4way(perm, contested, uncalled),
-                payouts,
-            );
+            four_icm[perm] = icm4(&apply_permutation_4way(perm, contested, uncalled), payouts);
         }
 
         cards()?;
@@ -868,22 +1065,8 @@ fn fill_hu(
 ) {
     let shared = shared_cards();
     for h in 0..HAND_TYPES {
-        out[seat_a][h] = hu_vs(
-            h,
-            range_b,
-            &shared.unblock[h],
-            icm_a_wins[seat_a],
-            icm_b_wins[seat_a],
-            shared,
-        );
-        out[seat_b][h] = hu_vs(
-            h,
-            range_a,
-            &shared.unblock[h],
-            icm_b_wins[seat_b],
-            icm_a_wins[seat_b],
-            shared,
-        );
+        out[seat_a][h] = hu_vs(h, range_b, icm_a_wins[seat_a], icm_b_wins[seat_a], shared);
+        out[seat_b][h] = hu_vs(h, range_a, icm_b_wins[seat_b], icm_a_wins[seat_b], shared);
     }
     let p_a = hu_uncond(range_a, range_b, shared);
     for seat in 0..4 {
@@ -898,20 +1081,21 @@ fn fill_hu(
 fn hu_vs(
     hero: usize,
     villain: &[f64; HAND_TYPES],
-    unblock: &[u8; HAND_TYPES],
     icm_win: f64,
     icm_lose: f64,
     shared: &Shared,
 ) -> f64 {
     let mut weight = 0.0;
     let mut equity = 0.0;
-    for v in 0..HAND_TYPES {
-        let live = f64::from(unblock[v]) * villain[v].clamp(0.0, 1.0);
-        if live <= 0.0 {
-            continue;
+    for unblock in &shared.unblock[hero] {
+        for v in 0..HAND_TYPES {
+            let live = f64::from(unblock[v]) * villain[v].clamp(0.0, 1.0);
+            if live <= 0.0 {
+                continue;
+            }
+            weight += live;
+            equity += live * f64::from(shared.equity[hero * HAND_TYPES + v]);
         }
-        weight += live;
-        equity += live * f64::from(shared.equity[hero * HAND_TYPES + v]);
     }
     let p = if weight > 0.0 { equity / weight } else { 0.5 };
     p * icm_win + (1.0 - p) * icm_lose
@@ -926,7 +1110,7 @@ fn hu_uncond(range_a: &[f64; HAND_TYPES], range_b: &[f64; HAND_TYPES], shared: &
             continue;
         }
         for b in 0..HAND_TYPES {
-            if shared.masks[a] & shared.masks[b] != 0 {
+            if types_block(a, b, shared) {
                 continue;
             }
             let wb = shared.combos[b] * range_b[b].clamp(0.0, 1.0);
@@ -989,21 +1173,15 @@ fn fill_three(
             weight[slot][h] = shared.combos[h] * ranges[slot][h].clamp(0.0, 1.0);
         }
     }
-    let slot_pay = [
-        seat_pay[slots[0]],
-        seat_pay[slots[1]],
-        seat_pay[slots[2]],
-    ];
+    let slot_pay = [seat_pay[slots[0]], seat_pay[slots[1]], seat_pay[slots[2]]];
     let folder_pay = seat_pay[folder];
 
     let acc = (0..HAND_TYPES)
         .into_par_iter()
         .fold(ThreeAccum::new, |mut acc, h0| {
-            let m0 = shared.masks[h0];
             let w0 = weight[0][h0];
             for h1 in 0..HAND_TYPES {
-                let m1 = shared.masks[h1];
-                if m0 & m1 != 0 {
+                if types_block(h0, h1, shared) {
                     continue;
                 }
                 let w1 = weight[1][h1];
@@ -1012,13 +1190,12 @@ fn fill_three(
                 }
                 let row = &shared.three[(h0 * HAND_TYPES + h1) * HAND_TYPES
                     ..(h0 * HAND_TYPES + h1) * HAND_TYPES + HAND_TYPES];
-                let pair = m0 | m1;
                 for h2 in 0..HAND_TYPES {
                     let w2 = weight[2][h2];
                     if w2 == 0.0 && w0 * w1 == 0.0 {
                         continue;
                     }
-                    if pair & shared.masks[h2] != 0 {
+                    if types_block(h0, h2, shared) || types_block(h1, h2, shared) {
                         continue;
                     }
                     let probs = row[h2];
@@ -1088,8 +1265,8 @@ fn fill_four(ranges: [&[f64; HAND_TYPES]; 4], pay: &[[f32; 4]]) -> [[f64; HAND_T
                     if buckets_conflict(hero_bucket, bucket, shared) {
                         continue;
                     }
-                    let idx = (((hero_seat * BUCKETS + hero_bucket) * 4 + opp_seat) * BUCKETS)
-                        + bucket;
+                    let idx =
+                        (((hero_seat * BUCKETS + hero_bucket) * 4 + opp_seat) * BUCKETS) + bucket;
                     blocked[idx] += shared.combos[hand] * ranges[opp_seat][hand].clamp(0.0, 1.0);
                 }
             }
@@ -1120,9 +1297,12 @@ fn fill_four(ranges: [&[f64; HAND_TYPES]; 4], pay: &[[f32; 4]]) -> [[f64; HAND_T
                             {
                                 continue;
                             }
-                            let w_utg = mass(0, ug, 1, bg) * mass(0, ug, 2, sg) * mass(0, ug, 3, bbg);
-                            let w_btn = mass(1, bg, 0, ug) * mass(1, bg, 2, sg) * mass(1, bg, 3, bbg);
-                            let w_sb = mass(2, sg, 0, ug) * mass(2, sg, 1, bg) * mass(2, sg, 3, bbg);
+                            let w_utg =
+                                mass(0, ug, 1, bg) * mass(0, ug, 2, sg) * mass(0, ug, 3, bbg);
+                            let w_btn =
+                                mass(1, bg, 0, ug) * mass(1, bg, 2, sg) * mass(1, bg, 3, bbg);
+                            let w_sb =
+                                mass(2, sg, 0, ug) * mass(2, sg, 1, bg) * mass(2, sg, 3, bbg);
                             let w_bb =
                                 mass(3, bbg, 0, ug) * mass(3, bbg, 1, bg) * mass(3, bbg, 2, sg);
                             if w_utg == 0.0 && w_btn == 0.0 && w_sb == 0.0 && w_bb == 0.0 {
@@ -1351,16 +1531,17 @@ impl Shared {
             cards[hand] = rep;
             masks[hand] = card_mask(rep);
             for other in 0..HAND_TYPES {
-                equity[hand * HAND_TYPES + other] = equity_cache.equity(hand as u8, other as u8) as f32;
+                equity[hand * HAND_TYPES + other] =
+                    equity_cache.equity(hand as u8, other as u8) as f32;
             }
         }
 
         let combos_all: Vec<Vec<[Card; 2]>> = (0..HAND_TYPES as u8).map(expand_combo).collect();
-        let built = crate::solver::build_unblocked(&combos_all);
-        let mut unblock = vec![[0_u8; HAND_TYPES]; HAND_TYPES];
-        for hand in 0..HAND_TYPES {
-            if let Some(row) = built[hand].first() {
-                unblock[hand] = *row;
+        let unblock = crate::solver::build_unblocked(&combos_all);
+        let mut block = [[false; HAND_TYPES]; HAND_TYPES];
+        for a in 0..HAND_TYPES {
+            for b in 0..HAND_TYPES {
+                block[a][b] = unblock[a].is_empty() || unblock[a].iter().all(|row| row[b] == 0);
             }
         }
 
@@ -1400,6 +1581,7 @@ impl Shared {
             cards,
             combos,
             unblock,
+            block,
             bucket,
             bucket_mask,
             bucket_cards,
@@ -1425,7 +1607,11 @@ fn find_file(name: &str) -> Option<PathBuf> {
         PathBuf::from(name),
         manifest.join(name),
         manifest.join("..").join(name),
-        manifest.join("..").join("poker_ui").join("assets").join(name),
+        manifest
+            .join("..")
+            .join("poker_ui")
+            .join("assets")
+            .join(name),
     ];
     candidates.into_iter().find(|path| path.is_file())
 }
@@ -1590,10 +1776,8 @@ mod tests {
 
     #[test]
     fn cfr_4max_equal_stacks_converges() {
-        let cache = EquityCache::load(
-            &find_file("equity_cache.bin").expect("equity_cache.bin"),
-        )
-        .expect("equity cache");
+        let cache = EquityCache::load(&find_file("equity_cache.bin").expect("equity_cache.bin"))
+            .expect("equity cache");
         let output = solve(&input([1000.0; 4], 200, 0.005), &cache);
         assert!(
             output.converged,
@@ -1601,13 +1785,17 @@ mod tests {
             output.iterations_used
         );
         assert!(
-            output.iterations_used < 200,
+            output.iterations_used <= 200,
             "iterations {}",
             output.iterations_used
         );
-        assert!(output.iterations_used > 2);
+        assert!(output.iterations_used >= MIN_CONVERGENCE_ITERS);
         let sum: f64 = output.equities.iter().sum();
-        assert!((sum - 1.0).abs() < 0.05, "equity sum {sum} {:?}", output.equities);
+        assert!(
+            (sum - 1.0).abs() < 0.05,
+            "equity sum {sum} {:?}",
+            output.equities
+        );
         let ranges = output.four_max.expect("4-max ranges");
         let aa = combo_index([Card::new(14, 0), Card::new(14, 1)]) as usize;
         let trash = combo_index([Card::new(7, 0), Card::new(2, 1)]) as usize;
@@ -1621,10 +1809,8 @@ mod tests {
 
     #[test]
     fn cfr_4max_unequal_stacks() {
-        let cache = EquityCache::load(
-            &find_file("equity_cache.bin").expect("equity_cache.bin"),
-        )
-        .expect("equity cache");
+        let cache = EquityCache::load(&find_file("equity_cache.bin").expect("equity_cache.bin"))
+            .expect("equity cache");
         let output = solve(&input([2000.0, 500.0, 1000.0, 1500.0], 200, 0.01), &cache);
         assert!(output.iterations_used > 0);
         assert_eq!(output.equities.len(), 4);
