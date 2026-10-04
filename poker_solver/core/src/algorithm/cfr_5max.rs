@@ -368,11 +368,6 @@ impl SolverAlgorithm for Cfr5Max {
             combo_share(&freq[five_node(4, 8)]) * 100.0,
         );
 
-        let mut packed = [[0.0; HAND_TYPES]; NODES];
-        for node in 0..NODES {
-            packed[node] = freq[node];
-        }
-
         SolverOutput {
             push_ranges,
             call_ranges,
@@ -383,8 +378,9 @@ impl SolverAlgorithm for Cfr5Max {
             hand_evs,
             three_max_hand_evs: None,
             four_max: None,
-            five_max: Some(FiveMaxRanges { freq: packed }),
+            five_max: Some(FiveMaxRanges { freq }),
             six_max: None,
+            seven_max: None,
         }
     }
 }

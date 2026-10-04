@@ -317,6 +317,7 @@ pub(crate) fn build_three_max_output(
         four_max: None,
         five_max: None,
         six_max: None,
+        seven_max: None,
     }
 }
 

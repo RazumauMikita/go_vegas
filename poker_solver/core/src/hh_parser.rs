@@ -59,7 +59,7 @@ impl std::fmt::Display for ParseError {
             ParseError::TooManyPlayers(n) => {
                 write!(
                     f,
-                    "слишком много игроков ({n}), поддерживаются 2–6"
+                    "слишком много игроков ({n}), поддерживаются 2–7"
                 )
             }
             ParseError::InvalidFormat(msg) => write!(f, "некорректный формат: {msg}"),
@@ -155,7 +155,7 @@ pub fn parse_hand_history(text: &str) -> Result<ParsedHand, ParseError> {
     }
 
     let player_count = players.len();
-    if player_count > 6 {
+    if player_count > 7 {
         return Err(ParseError::TooManyPlayers(player_count));
     }
     if player_count < 2 {
@@ -226,6 +226,15 @@ fn assign_positions(players: &mut [ParsedPlayer], button_seat: usize, table_max:
             Position::HJ,
             Position::CO,
         ],
+        7 => &[
+            Position::BTN,
+            Position::SB,
+            Position::BB,
+            Position::UTG,
+            Position::MP,
+            Position::HJ,
+            Position::CO,
+        ],
         _ => &POSITIONS_9MAX[..count.min(POSITIONS_9MAX.len())],
     };
 
@@ -292,6 +301,13 @@ pub fn solver_position_index(position: Position, num_players: usize) -> Option<u
         (6, Position::BTN) => Some(3),
         (6, Position::SB) => Some(4),
         (6, Position::BB) => Some(5),
+        (7, Position::UTG) => Some(0),
+        (7, Position::MP) => Some(1),
+        (7, Position::HJ) => Some(2),
+        (7, Position::CO) => Some(3),
+        (7, Position::BTN) => Some(4),
+        (7, Position::SB) => Some(5),
+        (7, Position::BB) => Some(6),
         _ => None,
     }
 }
