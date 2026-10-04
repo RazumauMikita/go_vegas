@@ -178,7 +178,7 @@ impl Cfr5Max {
     pub fn init(input: &SolverInput, cache: &EquityCache) -> Option<Self> {
         let solve_started = Instant::now();
         let model = Model::build(input, cache)?;
-        Some(Self {
+        let mut solver = Self {
             input: input.clone(),
             model,
             regret: vec![[[0.0; 2]; HAND_TYPES]; NODES],
@@ -190,7 +190,9 @@ impl Cfr5Max {
             iterations_done: 0,
             has_converged: false,
             solve_started,
-        })
+        };
+        crate::algorithm::apply_locked_strategies(&solver.input, &mut solver.strategy);
+        Some(solver)
     }
 
     pub fn run(input: &SolverInput, cache: &EquityCache) -> SolverOutput {
@@ -202,10 +204,14 @@ impl Cfr5Max {
 
     fn recompute_strategies(&mut self) {
         for node in 0..NODES {
+            if self.input.is_locked(node) {
+                continue;
+            }
             for h in 0..HAND_TYPES {
                 regret_match(&self.regret[node][h], &mut self.strategy[node][h]);
             }
         }
+        crate::algorithm::apply_locked_strategies(&self.input, &mut self.strategy);
     }
 
     fn frequencies(&self) -> Vec<[f64; HAND_TYPES]> {
@@ -215,6 +221,7 @@ impl Cfr5Max {
                 freq[node][h] = self.strategy[node][h][0];
             }
         }
+        crate::algorithm::overlay_locked_freqs(&self.input, &mut freq);
         freq
     }
 
@@ -239,6 +246,7 @@ impl Cfr5Max {
                 freq[node][h] = (self.sum[node][h] / self.weight_sum).clamp(0.0, 1.0);
             }
         }
+        crate::algorithm::overlay_locked_freqs(&self.input, &mut freq);
         freq
     }
 
@@ -257,6 +265,9 @@ impl SolverAlgorithm for Cfr5Max {
         let t = (self.iterations_done + 1) as f64;
 
         for node in 0..NODES {
+            if self.input.is_locked(node) {
+                continue;
+            }
             for hand in 0..HAND_TYPES {
                 let ev = action_ev(node, hand, &opp, &terminals);
                 let sigma = self.strategy[node][hand];
@@ -472,12 +483,7 @@ fn reach_of(node: usize, hand: usize, opp: &[[f64; HAND_TYPES]]) -> f64 {
     p
 }
 
-fn action_ev(
-    node: usize,
-    h: usize,
-    opp: &[[f64; HAND_TYPES]],
-    t: &Terminals,
-) -> (f64, f64) {
+fn action_ev(node: usize, h: usize, opp: &[[f64; HAND_TYPES]], t: &Terminals) -> (f64, f64) {
     let (actor, mask) = parse_node(node);
     let push = cont(actor + 1, mask | (1 << actor), actor, h, opp, t);
     let fold = cont(actor + 1, mask, actor, h, opp, t);
@@ -729,7 +735,9 @@ impl Model {
                 ranges,
                 term.seats,
                 &term.icm,
-                (0..PLAYERS).find(|&i| term.mask & (1 << i) == 0).unwrap_or(0),
+                (0..PLAYERS)
+                    .find(|&i| term.mask & (1 << i) == 0)
+                    .unwrap_or(0),
                 &self.four_cache,
                 shared,
                 &mut by_mask[term.mask as usize],
@@ -986,8 +994,11 @@ fn fill_four(
     let mut folder_num = 0.0;
     let mut folder_den = 0.0;
 
-    let hero_buckets: [Vec<usize>; 4] =
-        std::array::from_fn(|_| (0..BUCKETS).filter(|&b| shared.bucket_mask[b] != 0).collect());
+    let hero_buckets: [Vec<usize>; 4] = std::array::from_fn(|_| {
+        (0..BUCKETS)
+            .filter(|&b| shared.bucket_mask[b] != 0)
+            .collect()
+    });
 
     for slot in 0..4 {
         let others: Vec<usize> = (0..4).filter(|&s| s != slot).collect();
@@ -1601,6 +1612,7 @@ mod tests {
             profile: false,
             algorithm: Algorithm::Cfr5Max,
             rank_cache_strict: false,
+            locked_ranges: std::collections::HashMap::new(),
         }
     }
 

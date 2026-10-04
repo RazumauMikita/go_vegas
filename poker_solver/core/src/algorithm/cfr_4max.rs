@@ -200,7 +200,7 @@ impl Cfr4Max {
         let model = Model::build(input, cache)?;
         let half = || [[0.5, 0.5]; HAND_TYPES];
         let zero = || [[0.0, 0.0]; HAND_TYPES];
-        Some(Self {
+        let mut solver = Self {
             input: input.clone(),
             model,
             regret_utg: zero(),
@@ -238,7 +238,9 @@ impl Cfr4Max {
             iterations_done: 0,
             has_converged: false,
             solve_started,
-        })
+        };
+        solver.apply_locked_strategies();
+        Some(solver)
     }
 
     pub fn run(input: &SolverInput, cache: &EquityCache) -> SolverOutput {
@@ -301,6 +303,16 @@ impl Cfr4Max {
                 &mut self.strategy_bb_after_fold_fold_push[h],
             );
         }
+        self.apply_locked_strategies();
+    }
+
+    fn apply_locked_strategies(&mut self) {
+        for node in 0..NODES {
+            let Some(range) = self.input.locked_ranges.get(&node).copied() else {
+                continue;
+            };
+            crate::algorithm::set_locked_strategy(&range, self.strategy_mut(node));
+        }
     }
 
     fn frequencies(&self) -> [[f64; HAND_TYPES]; NODES] {
@@ -321,6 +333,7 @@ impl Cfr4Max {
             freq[N_BB_FPF][h] = self.strategy_bb_after_fold_push_fold[h][0];
             freq[N_BB_FFP][h] = self.strategy_bb_after_fold_fold_push[h][0];
         }
+        crate::algorithm::overlay_locked_freqs(&self.input, &mut freq);
         freq
     }
 
@@ -362,6 +375,25 @@ impl Cfr4Max {
         }
     }
 
+    fn strategy_mut(&mut self, node: usize) -> &mut [[f64; 2]; HAND_TYPES] {
+        match node {
+            N_UTG => &mut self.strategy_utg,
+            N_BTN_CALL => &mut self.strategy_btn_vs_push,
+            N_BTN_PUSH => &mut self.strategy_btn_after_fold,
+            N_SB_PC => &mut self.strategy_sb_after_push_call,
+            N_SB_PF => &mut self.strategy_sb_after_push_fold,
+            N_SB_FP => &mut self.strategy_sb_after_fold_push,
+            N_SB_FF => &mut self.strategy_sb_after_fold_fold,
+            N_BB_4 => &mut self.strategy_bb_4way,
+            N_BB_PCF => &mut self.strategy_bb_after_push_call_fold,
+            N_BB_PFC => &mut self.strategy_bb_after_push_fold_call,
+            N_BB_PFF => &mut self.strategy_bb_after_push_fold_fold,
+            N_BB_FPC => &mut self.strategy_bb_after_fold_push_call,
+            N_BB_FPF => &mut self.strategy_bb_after_fold_push_fold,
+            _ => &mut self.strategy_bb_after_fold_fold_push,
+        }
+    }
+
     fn accumulate(&mut self, freq: &[[f64; HAND_TYPES]; NODES], t: f64) {
         let tg = t.powf(DCFR_GAMMA);
         let beta = tg / (tg + 1.0);
@@ -383,6 +415,7 @@ impl Cfr4Max {
                 freq[node][h] = (self.sum[node][h] / self.weight_sum).clamp(0.0, 1.0);
             }
         }
+        crate::algorithm::overlay_locked_freqs(&self.input, &mut freq);
         freq
     }
 
@@ -402,6 +435,9 @@ impl SolverAlgorithm for Cfr4Max {
         let t = (self.iterations_done + 1) as f64;
 
         for node in 0..NODES {
+            if self.input.is_locked(node) {
+                continue;
+            }
             for hand in 0..HAND_TYPES {
                 let ev = action_ev(node, hand, &opp, &freq, &terminals, &self.model, &utg_fold);
                 let sigma = self.strategy_of(node, hand);
@@ -1776,6 +1812,7 @@ mod tests {
             profile: false,
             algorithm: Algorithm::Cfr4Max,
             rank_cache_strict: false,
+            locked_ranges: std::collections::HashMap::new(),
         }
     }
 

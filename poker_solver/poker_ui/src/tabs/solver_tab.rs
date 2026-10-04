@@ -10,10 +10,12 @@ use poker_core::{
 };
 
 use crate::tabs::strategy_tree::{
-    build_strategy_tree, draw_strategy_tree, node_at_path, NodePath, TreeNode,
+    build_strategy_tree, draw_strategy_tree, node_at_path, node_at_path_mut, NodePath, TreeNode,
 };
 use crate::util::format_duration;
-use crate::widgets::{combo_share, range_matrix_ui, MatrixMode};
+use crate::widgets::{
+    combo_share, fill_range_to_share, range_matrix_ui, rank_hands_for_slider, MatrixMode,
+};
 
 #[derive(Clone)]
 struct SolverResult {
@@ -25,6 +27,18 @@ struct SolverResult {
 
 enum SolverWorkerMessage {
     Done(SolverResult),
+}
+
+struct RangeEditor {
+    range_id: usize,
+    path: NodePath,
+    label: String,
+    range: [f64; 169],
+    ev_range: Option<[f64; 169]>,
+    slider_pct: f64,
+    ranking: Vec<usize>,
+    lock: bool,
+    matrix_mode: MatrixMode,
 }
 
 const CACHE_BYTES: &[u8] = include_bytes!("../../assets/equity_cache.bin");
@@ -47,6 +61,8 @@ pub struct SolverTab {
     result: Option<SolverResult>,
     tree: Vec<TreeNode>,
     selected_path: Option<NodePath>,
+    locked_ranges: HashMap<usize, [f64; 169]>,
+    range_editor: Option<RangeEditor>,
 }
 
 impl Default for SolverTab {
@@ -69,6 +85,8 @@ impl Default for SolverTab {
             result: None,
             tree: Vec::new(),
             selected_path: None,
+            locked_ranges: HashMap::new(),
+            range_editor: None,
         }
     }
 }
@@ -109,11 +127,23 @@ impl SolverTab {
                 .show(ctx, |ui| {
                     ui.heading("Strategy Tree");
                     ui.separator();
+                    let mut editor_path = None;
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
-                            draw_strategy_tree(ui, &mut self.tree, &mut self.selected_path, &[], 0);
+                            draw_strategy_tree(
+                                ui,
+                                &mut self.tree,
+                                &mut self.selected_path,
+                                &mut editor_path,
+                                &self.locked_ranges,
+                                &[],
+                                0,
+                            );
                         });
+                    if let Some(path) = editor_path {
+                        self.open_range_editor(path);
+                    }
                 });
         }
 
@@ -127,19 +157,23 @@ impl SolverTab {
                 });
             }
         });
+
+        self.draw_range_editor(ctx);
     }
 
     pub fn poll(&mut self, ctx: &Context) {
         if let Some(rx) = &self.worker_rx {
             match rx.try_recv() {
                 Ok(SolverWorkerMessage::Done(result)) => {
+                    let keep_path = self.selected_path.clone();
                     self.tree = build_strategy_tree(&result.output, result.input.button_index);
-                    self.selected_path = if self.tree.is_empty() {
-                        None
-                    } else {
-                        Some(vec![0])
-                    };
+                    self.selected_path =
+                        keep_path.filter(|path| node_at_path(&self.tree, path).is_some());
+                    if self.selected_path.is_none() && !self.tree.is_empty() {
+                        self.selected_path = Some(vec![0]);
+                    }
                     self.result = Some(result);
+                    self.range_editor = None;
                     self.error = None;
                     self.computing = false;
                     self.worker_rx = None;
@@ -403,11 +437,22 @@ impl SolverTab {
                 self.import_hand_from_clipboard();
             }
             let can_run = !self.computing;
+            let calc_label = if self.locked_ranges.is_empty() {
+                "Рассчитать"
+            } else {
+                "Пересчитать"
+            };
             if ui
-                .add_enabled(can_run, egui::Button::new("Рассчитать"))
+                .add_enabled(can_run, egui::Button::new(calc_label))
                 .clicked()
             {
                 self.start_calculation(ctx);
+            }
+            if !self.locked_ranges.is_empty() {
+                ui.label(format!("локи: {}", self.locked_ranges.len()));
+                if ui.button("Снять локи").clicked() {
+                    self.locked_ranges.clear();
+                }
             }
             if self.computing {
                 ui.spinner();
@@ -452,16 +497,52 @@ impl SolverTab {
         });
 
         if let Some(path) = path {
-            let node_data = node_at_path(&self.tree, &path)
-                .map(|node| (node.label.clone(), node.range, node.ev_range));
+            let range_id = node_at_path(&self.tree, &path).map(|node| node.range_id);
+            let ev_range = node_at_path(&self.tree, &path).and_then(|node| node.ev_range);
+            let label = node_at_path(&self.tree, &path).map(|node| node.label.clone());
 
-            if let Some((label, range, ev_range)) = node_data {
+            if let (Some(range_id), Some(label)) = (range_id, label) {
+                ui.horizontal(|ui| {
+                    let is_locked = self.locked_ranges.contains_key(&range_id);
+                    let lock_text = if is_locked { "Locked" } else { "Lock" };
+                    if ui.selectable_label(is_locked, lock_text).clicked() {
+                        if is_locked {
+                            self.locked_ranges.remove(&range_id);
+                        } else if let Some(node) = node_at_path(&self.tree, &path) {
+                            self.locked_ranges.insert(range_id, node.range);
+                        }
+                    }
+                    if ui.button("Изменить").clicked() {
+                        self.open_range_editor(path.clone());
+                    }
+                    if is_locked {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(200, 160, 60),
+                            "диапазон зафиксирован",
+                        );
+                    }
+                });
+                ui.label(
+                    RichText::new("Кликните диапазон в дереве, чтобы изменить его.")
+                        .small()
+                        .weak(),
+                );
+
                 {
                     let mode = self
                         .matrix_modes
                         .entry(label.clone())
                         .or_insert(MatrixMode::Frequency);
-                    range_matrix_ui(ui, &range, ev_range.as_ref(), mode, &label);
+                    if let Some(node) = node_at_path_mut(&mut self.tree, &path) {
+                        range_matrix_ui(
+                            ui,
+                            &mut node.range,
+                            ev_range.as_ref(),
+                            mode,
+                            &label,
+                            false,
+                        );
+                    }
                 }
 
                 ui.add_space(12.0);
@@ -502,6 +583,8 @@ impl SolverTab {
             }
         }
         self.prize_percents.truncate(count);
+        self.locked_ranges.clear();
+        self.range_editor = None;
     }
 
     fn start_calculation(&mut self, ctx: &Context) {
@@ -523,9 +606,6 @@ impl SolverTab {
         let (tx, rx) = mpsc::channel();
         self.worker_rx = Some(rx);
         self.computing = true;
-        self.result = None;
-        self.tree.clear();
-        self.selected_path = None;
         ctx.request_repaint();
 
         thread::spawn(move || {
@@ -539,6 +619,121 @@ impl SolverTab {
                 duration,
             }));
         });
+    }
+
+    fn open_range_editor(&mut self, path: NodePath) {
+        let Some(node) = node_at_path(&self.tree, &path) else {
+            return;
+        };
+        self.range_editor = Some(RangeEditor {
+            range_id: node.range_id,
+            path,
+            label: node.label.clone(),
+            range: node.range,
+            ev_range: node.ev_range,
+            slider_pct: combo_share(&node.range) * 100.0,
+            ranking: rank_hands_for_slider(&node.range, node.ev_range.as_ref()),
+            lock: self.locked_ranges.contains_key(&node.range_id),
+            matrix_mode: MatrixMode::Frequency,
+        });
+    }
+
+    fn apply_range_editor(&mut self) {
+        let Some(editor) = self.range_editor.take() else {
+            return;
+        };
+        if let Some(node) = node_at_path_mut(&mut self.tree, &editor.path) {
+            node.range = editor.range;
+            node.range_pct = combo_share(&editor.range) * 100.0;
+        }
+        if let Some(result) = self.result.as_mut() {
+            result.output.set_range(editor.range_id, editor.range);
+        }
+        if editor.lock {
+            self.locked_ranges.insert(editor.range_id, editor.range);
+        } else {
+            self.locked_ranges.remove(&editor.range_id);
+        }
+    }
+
+    fn draw_range_editor(&mut self, ctx: &Context) {
+        let mut open = self.range_editor.is_some();
+        if !open {
+            return;
+        }
+        let mut apply = false;
+        let mut cancel = false;
+        let title = self
+            .range_editor
+            .as_ref()
+            .map(|editor| format!("Диапазон: {}", editor.label))
+            .unwrap_or_default();
+
+        egui::Window::new(title)
+            .id(egui::Id::new("solver_range_editor"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                let Some(editor) = self.range_editor.as_mut() else {
+                    return;
+                };
+
+                ui.horizontal(|ui| {
+                    ui.label("Range");
+                    let mut pct = editor.slider_pct;
+                    let width = (ui.available_width() - 8.0).max(180.0);
+                    let slider = ui.add_sized(
+                        [width, 18.0],
+                        egui::Slider::new(&mut pct, 0.0..=100.0)
+                            .suffix("%")
+                            .max_decimals(1),
+                    );
+                    if slider.changed() {
+                        editor.slider_pct = pct;
+                        editor.range = fill_range_to_share(&editor.ranking, pct / 100.0);
+                    }
+                });
+                ui.label(
+                    RichText::new(
+                        "Ползунок набирает руки по EV (или по силе). Клик по ячейке включает/выключает руку.",
+                    )
+                    .small()
+                    .weak(),
+                );
+                ui.add_space(8.0);
+
+                if range_matrix_ui(
+                    ui,
+                    &mut editor.range,
+                    editor.ev_range.as_ref(),
+                    &mut editor.matrix_mode,
+                    "",
+                    true,
+                ) {
+                    editor.slider_pct = combo_share(&editor.range) * 100.0;
+                }
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut editor.lock, "Lock");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Отмена").clicked() {
+                            cancel = true;
+                        }
+                        if ui.button("OK").clicked() {
+                            apply = true;
+                        }
+                    });
+                });
+            });
+
+        if apply {
+            self.apply_range_editor();
+        } else if cancel || !open {
+            self.range_editor = None;
+        }
     }
 
     fn parse_input(&self) -> Result<SolverInput, String> {
@@ -627,6 +822,7 @@ impl SolverTab {
             profile: false,
             algorithm: resolve_algorithm(self.algorithm, self.player_count),
             rank_cache_strict: false,
+            locked_ranges: self.locked_ranges.clone(),
         })
     }
 

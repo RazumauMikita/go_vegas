@@ -22,7 +22,7 @@ pub struct CfrSolver<'a> {
 impl<'a> CfrSolver<'a> {
     pub fn init(input: &SolverInput, cache: &'a EquityCache) -> Option<Self> {
         let ctx = HuContext::new(input)?;
-        Some(Self {
+        let mut solver = Self {
             input: input.clone(),
             cache,
             ctx,
@@ -34,7 +34,9 @@ impl<'a> CfrSolver<'a> {
             prev_call: [0.0; HAND_TYPES],
             iterations_done: 0,
             has_converged: false,
-        })
+        };
+        solver.apply_locked_strategies();
+        Some(solver)
     }
 
     pub fn run(input: &SolverInput, cache: &'a EquityCache) -> SolverOutput {
@@ -44,11 +46,25 @@ impl<'a> CfrSolver<'a> {
         }
     }
 
+    fn apply_locked_strategies(&mut self) {
+        if let Some(range) = self.input.locked_ranges.get(&0).copied() {
+            crate::algorithm::set_locked_strategy(&range, &mut self.strategy_sb);
+        }
+        if let Some(range) = self.input.locked_ranges.get(&1).copied() {
+            crate::algorithm::set_locked_strategy(&range, &mut self.strategy_bb);
+        }
+    }
+
     fn recompute_strategy(&mut self) {
         for h in 0..HAND_TYPES {
-            regret_match(&self.regret_sb[h], &mut self.strategy_sb[h]);
-            regret_match(&self.regret_bb[h], &mut self.strategy_bb[h]);
+            if !self.input.is_locked(0) {
+                regret_match(&self.regret_sb[h], &mut self.strategy_sb[h]);
+            }
+            if !self.input.is_locked(1) {
+                regret_match(&self.regret_bb[h], &mut self.strategy_bb[h]);
+            }
         }
+        self.apply_locked_strategies();
     }
 
     fn current_ranges(&self) -> ([f64; HAND_TYPES], [f64; HAND_TYPES]) {
@@ -57,6 +73,12 @@ impl<'a> CfrSolver<'a> {
         for h in 0..HAND_TYPES {
             push_range[h] = self.strategy_sb[h][0];
             call_range[h] = self.strategy_bb[h][0];
+        }
+        if let Some(range) = self.input.locked_ranges.get(&0) {
+            push_range = *range;
+        }
+        if let Some(range) = self.input.locked_ranges.get(&1) {
+            call_range = *range;
         }
         (push_range, call_range)
     }
@@ -103,27 +125,33 @@ impl SolverAlgorithm for CfrSolver<'_> {
         self.recompute_strategy();
         let (push_range, call_range) = self.current_ranges();
 
-        for hand_sb in 0..HAND_TYPES {
-            let ev_push = ev_push_sb(hand_sb, &call_range, &self.ctx, self.cache);
-            let ev_fold = self.ctx.ev_sb_fold;
-            let sigma_push = self.strategy_sb[hand_sb][0];
-            let sigma_fold = self.strategy_sb[hand_sb][1];
-            let expected = sigma_push * ev_push + sigma_fold * ev_fold;
-            self.regret_sb[hand_sb][0] = (self.regret_sb[hand_sb][0] + ev_push - expected).max(0.0);
-            self.regret_sb[hand_sb][1] = (self.regret_sb[hand_sb][1] + ev_fold - expected).max(0.0);
+        if !self.input.is_locked(0) {
+            for hand_sb in 0..HAND_TYPES {
+                let ev_push = ev_push_sb(hand_sb, &call_range, &self.ctx, self.cache);
+                let ev_fold = self.ctx.ev_sb_fold;
+                let sigma_push = self.strategy_sb[hand_sb][0];
+                let sigma_fold = self.strategy_sb[hand_sb][1];
+                let expected = sigma_push * ev_push + sigma_fold * ev_fold;
+                self.regret_sb[hand_sb][0] =
+                    (self.regret_sb[hand_sb][0] + ev_push - expected).max(0.0);
+                self.regret_sb[hand_sb][1] =
+                    (self.regret_sb[hand_sb][1] + ev_fold - expected).max(0.0);
+            }
         }
 
-        for hand_bb in 0..HAND_TYPES {
-            let ev_call = ev_call_bb(hand_bb, &push_range, &self.ctx, self.cache);
-            let ev_fold = self.ctx.ev_bb_fold;
-            let p_push = reach_vs_range(hand_bb, &push_range, &self.ctx);
-            let sigma_call = self.strategy_bb[hand_bb][0];
-            let sigma_fold = self.strategy_bb[hand_bb][1];
-            let expected = sigma_call * ev_call + sigma_fold * ev_fold;
-            self.regret_bb[hand_bb][0] =
-                (self.regret_bb[hand_bb][0] + p_push * (ev_call - expected)).max(0.0);
-            self.regret_bb[hand_bb][1] =
-                (self.regret_bb[hand_bb][1] + p_push * (ev_fold - expected)).max(0.0);
+        if !self.input.is_locked(1) {
+            for hand_bb in 0..HAND_TYPES {
+                let ev_call = ev_call_bb(hand_bb, &push_range, &self.ctx, self.cache);
+                let ev_fold = self.ctx.ev_bb_fold;
+                let p_push = reach_vs_range(hand_bb, &push_range, &self.ctx);
+                let sigma_call = self.strategy_bb[hand_bb][0];
+                let sigma_fold = self.strategy_bb[hand_bb][1];
+                let expected = sigma_call * ev_call + sigma_fold * ev_fold;
+                self.regret_bb[hand_bb][0] =
+                    (self.regret_bb[hand_bb][0] + p_push * (ev_call - expected)).max(0.0);
+                self.regret_bb[hand_bb][1] =
+                    (self.regret_bb[hand_bb][1] + p_push * (ev_fold - expected)).max(0.0);
+            }
         }
 
         self.iterations_done += 1;
@@ -151,6 +179,12 @@ impl SolverAlgorithm for CfrSolver<'_> {
             push_range[h] = strategy[0];
             regret_match(&self.regret_bb[h], &mut strategy);
             call_range[h] = strategy[0];
+        }
+        if let Some(range) = self.input.locked_ranges.get(&0) {
+            push_range = *range;
+        }
+        if let Some(range) = self.input.locked_ranges.get(&1) {
+            call_range = *range;
         }
         let sb_equity = average_sb_equity(&push_range, &call_range, &self.ctx, self.cache);
         build_hu_output(

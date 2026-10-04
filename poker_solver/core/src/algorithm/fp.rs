@@ -24,8 +24,8 @@ impl<'a> FictitiousPlay<'a> {
             input: input.clone(),
             cache,
             ctx,
-            push_range: [1.0; HAND_TYPES],
-            call_range: [1.0; HAND_TYPES],
+            push_range: crate::algorithm::initial_locked_range(input, 0, 1.0),
+            call_range: crate::algorithm::initial_locked_range(input, 1, 1.0),
             push_sum: [0.0; HAND_TYPES],
             call_sum: [0.0; HAND_TYPES],
             iterations_done: 0,
@@ -63,14 +63,18 @@ impl SolverAlgorithm for FictitiousPlay<'_> {
         let mut change = 0.0;
         let t = self.iterations_done as f64;
         for hand_idx in 0..HAND_TYPES {
-            self.push_sum[hand_idx] += br_push[hand_idx];
-            self.call_sum[hand_idx] += br_call[hand_idx];
-            let next_push = self.push_sum[hand_idx] / t;
-            let next_call = self.call_sum[hand_idx] / t;
-            change += (next_push - self.push_range[hand_idx]).abs();
-            change += (next_call - self.call_range[hand_idx]).abs();
-            self.push_range[hand_idx] = next_push;
-            self.call_range[hand_idx] = next_call;
+            if !self.input.is_locked(0) {
+                self.push_sum[hand_idx] += br_push[hand_idx];
+                let next_push = self.push_sum[hand_idx] / t;
+                change += (next_push - self.push_range[hand_idx]).abs();
+                self.push_range[hand_idx] = next_push;
+            }
+            if !self.input.is_locked(1) {
+                self.call_sum[hand_idx] += br_call[hand_idx];
+                let next_call = self.call_sum[hand_idx] / t;
+                change += (next_call - self.call_range[hand_idx]).abs();
+                self.call_range[hand_idx] = next_call;
+            }
         }
 
         let mean_change = change / (2.0 * HAND_TYPES as f64);

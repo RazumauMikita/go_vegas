@@ -47,7 +47,7 @@ pub struct Cfr3Max<'a> {
 impl<'a> Cfr3Max<'a> {
     pub fn init(input: &SolverInput, cache: &'a EquityCache) -> Option<Self> {
         let ctx = ThreeMaxContext::new(input, load_three_way_cache())?;
-        Some(Self {
+        let mut solver = Self {
             input: input.clone(),
             cache,
             ctx,
@@ -70,7 +70,9 @@ impl<'a> Cfr3Max<'a> {
             iterations_done: 0,
             has_converged: false,
             solve_started: Instant::now(),
-        })
+        };
+        solver.apply_locked_strategies();
+        Some(solver)
     }
 
     pub fn run(input: &SolverInput, cache: &'a EquityCache) -> SolverOutput {
@@ -80,18 +82,52 @@ impl<'a> Cfr3Max<'a> {
         }
     }
 
+    fn apply_locked_strategies(&mut self) {
+        if let Some(range) = self.input.locked_ranges.get(&0).copied() {
+            crate::algorithm::set_locked_strategy(&range, &mut self.strategy_btn);
+        }
+        if let Some(range) = self.input.locked_ranges.get(&1).copied() {
+            crate::algorithm::set_locked_strategy(&range, &mut self.strategy_sb_vs_push);
+        }
+        if let Some(range) = self.input.locked_ranges.get(&2).copied() {
+            crate::algorithm::set_locked_strategy(&range, &mut self.strategy_bb_vs_btn);
+        }
+        if let Some(range) = self.input.locked_ranges.get(&3).copied() {
+            crate::algorithm::set_locked_strategy(&range, &mut self.strategy_bb_vs_both);
+        }
+        if let Some(range) = self.input.locked_ranges.get(&4).copied() {
+            crate::algorithm::set_locked_strategy(&range, &mut self.strategy_sb_after_fold);
+        }
+        if let Some(range) = self.input.locked_ranges.get(&5).copied() {
+            crate::algorithm::set_locked_strategy(&range, &mut self.strategy_bb_vs_sb);
+        }
+    }
+
     fn recompute_strategies(&mut self) {
         for h in 0..HAND_TYPES {
-            regret_match(&self.regret_btn[h], &mut self.strategy_btn[h]);
-            regret_match(&self.regret_sb_vs_push[h], &mut self.strategy_sb_vs_push[h]);
-            regret_match(
-                &self.regret_sb_after_fold[h],
-                &mut self.strategy_sb_after_fold[h],
-            );
-            regret_match(&self.regret_bb_vs_both[h], &mut self.strategy_bb_vs_both[h]);
-            regret_match(&self.regret_bb_vs_btn[h], &mut self.strategy_bb_vs_btn[h]);
-            regret_match(&self.regret_bb_vs_sb[h], &mut self.strategy_bb_vs_sb[h]);
+            if !self.input.is_locked(0) {
+                regret_match(&self.regret_btn[h], &mut self.strategy_btn[h]);
+            }
+            if !self.input.is_locked(1) {
+                regret_match(&self.regret_sb_vs_push[h], &mut self.strategy_sb_vs_push[h]);
+            }
+            if !self.input.is_locked(4) {
+                regret_match(
+                    &self.regret_sb_after_fold[h],
+                    &mut self.strategy_sb_after_fold[h],
+                );
+            }
+            if !self.input.is_locked(3) {
+                regret_match(&self.regret_bb_vs_both[h], &mut self.strategy_bb_vs_both[h]);
+            }
+            if !self.input.is_locked(2) {
+                regret_match(&self.regret_bb_vs_btn[h], &mut self.strategy_bb_vs_btn[h]);
+            }
+            if !self.input.is_locked(5) {
+                regret_match(&self.regret_bb_vs_sb[h], &mut self.strategy_bb_vs_sb[h]);
+            }
         }
+        self.apply_locked_strategies();
     }
 
     fn current_ranges(&self) -> [[f64; HAND_TYPES]; 6] {
@@ -104,6 +140,7 @@ impl<'a> Cfr3Max<'a> {
             ranges[4][h] = self.strategy_sb_after_fold[h][0];
             ranges[5][h] = self.strategy_bb_vs_sb[h][0];
         }
+        crate::algorithm::overlay_locked_freqs(&self.input, &mut ranges);
         ranges
     }
 
@@ -117,6 +154,7 @@ impl<'a> Cfr3Max<'a> {
                 ranges[kind][h] = (self.sum[kind][h] / self.weight_sum).clamp(0.0, 1.0);
             }
         }
+        crate::algorithm::overlay_locked_freqs(&self.input, &mut ranges);
         ranges
     }
 
@@ -168,48 +206,60 @@ impl<'a> Cfr3Max<'a> {
                 opponent_reach(4, hand, ranges, &self.ctx),
                 opponent_reach(5, hand, ranges, &self.ctx),
             ];
-            dcfr(
-                &mut self.regret_btn[hand],
-                evs[0][hand],
-                self.strategy_btn[hand],
-                reach[0],
-                t,
-            );
-            dcfr(
-                &mut self.regret_sb_vs_push[hand],
-                evs[1][hand],
-                self.strategy_sb_vs_push[hand],
-                reach[1],
-                t,
-            );
-            dcfr(
-                &mut self.regret_bb_vs_btn[hand],
-                evs[2][hand],
-                self.strategy_bb_vs_btn[hand],
-                reach[2],
-                t,
-            );
-            dcfr(
-                &mut self.regret_bb_vs_both[hand],
-                evs[3][hand],
-                self.strategy_bb_vs_both[hand],
-                reach[3],
-                t,
-            );
-            dcfr(
-                &mut self.regret_sb_after_fold[hand],
-                evs[4][hand],
-                self.strategy_sb_after_fold[hand],
-                reach[4],
-                t,
-            );
-            dcfr(
-                &mut self.regret_bb_vs_sb[hand],
-                evs[5][hand],
-                self.strategy_bb_vs_sb[hand],
-                reach[5],
-                t,
-            );
+            if !self.input.is_locked(0) {
+                dcfr(
+                    &mut self.regret_btn[hand],
+                    evs[0][hand],
+                    self.strategy_btn[hand],
+                    reach[0],
+                    t,
+                );
+            }
+            if !self.input.is_locked(1) {
+                dcfr(
+                    &mut self.regret_sb_vs_push[hand],
+                    evs[1][hand],
+                    self.strategy_sb_vs_push[hand],
+                    reach[1],
+                    t,
+                );
+            }
+            if !self.input.is_locked(2) {
+                dcfr(
+                    &mut self.regret_bb_vs_btn[hand],
+                    evs[2][hand],
+                    self.strategy_bb_vs_btn[hand],
+                    reach[2],
+                    t,
+                );
+            }
+            if !self.input.is_locked(3) {
+                dcfr(
+                    &mut self.regret_bb_vs_both[hand],
+                    evs[3][hand],
+                    self.strategy_bb_vs_both[hand],
+                    reach[3],
+                    t,
+                );
+            }
+            if !self.input.is_locked(4) {
+                dcfr(
+                    &mut self.regret_sb_after_fold[hand],
+                    evs[4][hand],
+                    self.strategy_sb_after_fold[hand],
+                    reach[4],
+                    t,
+                );
+            }
+            if !self.input.is_locked(5) {
+                dcfr(
+                    &mut self.regret_bb_vs_sb[hand],
+                    evs[5][hand],
+                    self.strategy_bb_vs_sb[hand],
+                    reach[5],
+                    t,
+                );
+            }
         }
     }
 

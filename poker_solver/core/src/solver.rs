@@ -42,6 +42,8 @@ pub struct SolverInput {
     pub algorithm: Algorithm,
     /// Если true, SENTINEL в 3-way rank cache — ошибка, без lazy compute.
     pub rank_cache_strict: bool,
+    /// Зафиксированные частоты info-set. Ключ — индекс узла для текущего числа игроков.
+    pub locked_ranges: HashMap<usize, [f64; HAND_TYPES]>,
 }
 
 /// Диапазоны 3-max push/fold.
@@ -99,6 +101,84 @@ pub struct SolverOutput {
     pub eight_max: Option<EightMaxRanges>,
     /// Диапазоны 9-max push/fold (510 info set).
     pub nine_max: Option<NineMaxRanges>,
+}
+
+impl SolverInput {
+    pub fn is_locked(&self, id: usize) -> bool {
+        self.locked_ranges.contains_key(&id)
+    }
+}
+
+impl SolverOutput {
+    pub fn set_range(&mut self, id: usize, range: [f64; HAND_TYPES]) {
+        if let Some(ranges) = self.nine_max.as_mut() {
+            if let Some(slot) = ranges.freq.get_mut(id) {
+                *slot = range;
+            }
+            return;
+        }
+        if let Some(ranges) = self.eight_max.as_mut() {
+            if let Some(slot) = ranges.freq.get_mut(id) {
+                *slot = range;
+            }
+            return;
+        }
+        if let Some(ranges) = self.seven_max.as_mut() {
+            if let Some(slot) = ranges.freq.get_mut(id) {
+                *slot = range;
+            }
+            return;
+        }
+        if let Some(ranges) = self.six_max.as_mut() {
+            if let Some(slot) = ranges.freq.get_mut(id) {
+                *slot = range;
+            }
+            return;
+        }
+        if let Some(ranges) = self.five_max.as_mut() {
+            if let Some(slot) = ranges.freq.get_mut(id) {
+                *slot = range;
+            }
+            return;
+        }
+        if let Some(ranges) = self.four_max.as_mut() {
+            match id {
+                0 => ranges.utg_push = range,
+                1 => ranges.btn_call_vs_push = range,
+                2 => ranges.btn_push = range,
+                3 => ranges.sb_call_vs_utg_btn = range,
+                4 => ranges.sb_call_vs_utg = range,
+                5 => ranges.sb_call_vs_btn = range,
+                6 => ranges.sb_push = range,
+                7 => ranges.bb_call_4way = range,
+                8 => ranges.bb_call_vs_utg_btn = range,
+                9 => ranges.bb_call_vs_utg_sb = range,
+                10 => ranges.bb_call_vs_utg = range,
+                11 => ranges.bb_call_vs_btn_sb = range,
+                12 => ranges.bb_call_vs_btn = range,
+                13 => ranges.bb_call_vs_sb = range,
+                _ => {}
+            }
+            return;
+        }
+        if let Some(ranges) = self.three_max.as_mut() {
+            match id {
+                0 => ranges.btn_push = range,
+                1 => ranges.sb_call_vs_btn = range,
+                2 => ranges.bb_call_vs_btn = range,
+                3 => ranges.bb_call_vs_btn_and_sb = range,
+                4 => ranges.sb_push = range,
+                5 => ranges.bb_call_vs_sb = range,
+                _ => {}
+            }
+            return;
+        }
+        match id {
+            0 if !self.push_ranges.is_empty() => self.push_ranges[0] = range,
+            1 if self.call_ranges.len() > 1 => self.call_ranges[1] = range,
+            _ => {}
+        }
+    }
 }
 
 /// Диапазоны 4-max push/fold. Индекс 0 в каждой паре действий — push или call.
@@ -730,6 +810,7 @@ mod tests {
             profile: false,
             algorithm: Algorithm::FictitiousPlay,
             rank_cache_strict: false,
+            locked_ranges: HashMap::new(),
         }
     }
 
@@ -784,6 +865,20 @@ mod tests {
             "short SB expected to push > 60% of combos, got {:.1}%",
             share * 100.0
         );
+    }
+
+    #[test]
+    fn locked_sb_push_is_preserved() {
+        let mut input = test_input([1000.0, 1000.0]);
+        input.locked_ranges.insert(0, [1.0; HAND_TYPES]);
+        let output = solve(&input, test_cache());
+        for &freq in &output.push_ranges[0] {
+            assert!(
+                (freq - 1.0).abs() < 1e-9,
+                "locked SB push must stay at 1.0, got {freq}"
+            );
+        }
+        assert!(output.call_ranges[1].iter().any(|&freq| freq < 1.0));
     }
 
     #[test]
@@ -894,6 +989,7 @@ mod tests {
             profile: false,
             algorithm: Algorithm::FictitiousPlay,
             rank_cache_strict: false,
+            locked_ranges: HashMap::new(),
         }
     }
 
@@ -1009,6 +1105,7 @@ mod tests {
             profile: false,
             algorithm: Algorithm::Cfr3Max,
             rank_cache_strict: false,
+            locked_ranges: HashMap::new(),
         }
     }
 
@@ -1117,6 +1214,7 @@ mod tests {
             profile: false,
             algorithm: Algorithm::FictitiousPlay,
             rank_cache_strict: false,
+            locked_ranges: HashMap::new(),
         };
         let ctx = HuContext::new(&input).expect("HU context");
 

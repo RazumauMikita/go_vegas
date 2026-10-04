@@ -16,6 +16,7 @@ pub enum Action {
 
 #[derive(Clone)]
 pub struct TreeNode {
+    pub range_id: usize,
     pub label: String,
     pub action: Action,
     pub range_pct: f64,
@@ -59,10 +60,23 @@ pub fn node_at_path<'a>(tree: &'a [TreeNode], path: &[usize]) -> Option<&'a Tree
     Some(current)
 }
 
+pub fn node_at_path_mut<'a>(tree: &'a mut [TreeNode], path: &[usize]) -> Option<&'a mut TreeNode> {
+    if path.is_empty() {
+        return None;
+    }
+    let mut current: &mut TreeNode = tree.get_mut(path[0])?;
+    for &index in path.iter().skip(1) {
+        current = current.children.get_mut(index)?;
+    }
+    Some(current)
+}
+
 pub fn draw_strategy_tree(
     ui: &mut Ui,
     tree: &mut [TreeNode],
     selected_path: &mut Option<NodePath>,
+    editor_path: &mut Option<NodePath>,
+    locked_ids: &std::collections::HashMap<usize, [f64; 169]>,
     path_prefix: &[usize],
     depth: usize,
 ) {
@@ -87,6 +101,7 @@ pub fn draw_strategy_tree(
                 }
             }
 
+            let is_locked = locked_ids.contains_key(&node.range_id);
             let marker = if is_selected { "●" } else { "○" };
             let action_char = match node.action {
                 Action::Raise => "R",
@@ -97,20 +112,39 @@ pub fn draw_strategy_tree(
                 node.label, node.range_pct
             );
 
+            if is_locked {
+                ui.add(
+                    egui::Button::new(RichText::new("LOCK").small().strong().color(Color32::BLACK))
+                        .fill(Color32::from_rgb(255, 196, 40))
+                        .stroke(egui::Stroke::NONE)
+                        .sense(egui::Sense::hover()),
+                );
+            }
+
             let action_color = action_color(node.action);
-            let bg = if is_selected {
+            let bg = if is_selected && is_locked {
+                Color32::from_rgb(160, 120, 40)
+            } else if is_selected {
                 Color32::from_rgb(100, 150, 220)
+            } else if is_locked {
+                Color32::from_rgb(70, 55, 20)
             } else {
                 ui.visuals().widgets.noninteractive.bg_fill
+            };
+            let stroke = if is_locked {
+                egui::Stroke::new(1.5_f32, Color32::from_rgb(255, 196, 40))
+            } else {
+                egui::Stroke::NONE
             };
 
             let response = ui.add(
                 egui::Button::new(RichText::new(row_text).color(action_color))
                     .fill(bg)
-                    .stroke(egui::Stroke::NONE),
+                    .stroke(stroke),
             );
             if response.clicked() {
                 *selected_path = Some(current_path.clone());
+                *editor_path = Some(current_path.clone());
             }
         });
 
@@ -119,6 +153,8 @@ pub fn draw_strategy_tree(
                 ui,
                 &mut node.children,
                 selected_path,
+                editor_path,
+                locked_ids,
                 &current_path,
                 depth + 1,
             );
@@ -135,6 +171,7 @@ fn action_color(action: Action) -> Color32 {
 }
 
 fn make_node(
+    range_id: usize,
     label: &str,
     action: Action,
     range: [f64; 169],
@@ -142,6 +179,7 @@ fn make_node(
     children: Vec<TreeNode>,
 ) -> TreeNode {
     TreeNode {
+        range_id,
         label: label.to_string(),
         action,
         range_pct: combo_share(&range) * 100.0,
@@ -156,17 +194,20 @@ fn build_3max_tree(ranges: &ThreeMaxRanges, hand_evs: Option<&ThreeMaxHandEvs>) 
     let evs = hand_evs;
     vec![
         make_node(
+            0,
             "BTN push",
             Action::Raise,
             ranges.btn_push,
             evs.map(|e| e.btn_push),
             vec![make_node(
+                1,
                 "SB call",
                 Action::Call,
                 ranges.sb_call_vs_btn,
                 evs.map(|e| e.sb_call_vs_btn),
                 vec![
                     make_node(
+                        3,
                         "BB call (vs BTN+SB)",
                         Action::CallSpecial,
                         ranges.bb_call_vs_btn_and_sb,
@@ -174,6 +215,7 @@ fn build_3max_tree(ranges: &ThreeMaxRanges, hand_evs: Option<&ThreeMaxHandEvs>) 
                         vec![],
                     ),
                     make_node(
+                        2,
                         "BB call (vs BTN)",
                         Action::Call,
                         ranges.bb_call_vs_btn,
@@ -184,11 +226,13 @@ fn build_3max_tree(ranges: &ThreeMaxRanges, hand_evs: Option<&ThreeMaxHandEvs>) 
             )],
         ),
         make_node(
+            4,
             "SB push (BTN fold)",
             Action::Raise,
             ranges.sb_push,
             evs.map(|e| e.sb_push),
             vec![make_node(
+                5,
                 "BB call (vs SB)",
                 Action::Call,
                 ranges.bb_call_vs_sb,
@@ -224,23 +268,27 @@ fn build_4max_tree(
     let ev = |role: usize| seat_hand_ev(output, button_index, role);
     vec![
         make_node(
+            0,
             "CO push",
             Action::Raise,
             ranges.utg_push,
             ev(0),
             vec![
                 make_node(
+                    1,
                     "BTN call (vs CO)",
                     Action::Call,
                     ranges.btn_call_vs_push,
                     None,
                     vec![
                         make_node(
+                            3,
                             "SB call (vs CO+BTN)",
                             Action::Call,
                             ranges.sb_call_vs_utg_btn,
                             None,
                             vec![make_node(
+                                7,
                                 "BB call (4-way)",
                                 Action::CallSpecial,
                                 ranges.bb_call_4way,
@@ -249,6 +297,7 @@ fn build_4max_tree(
                             )],
                         ),
                         make_node(
+                            8,
                             "BB call (vs CO+BTN)",
                             Action::Call,
                             ranges.bb_call_vs_utg_btn,
@@ -258,11 +307,13 @@ fn build_4max_tree(
                     ],
                 ),
                 make_node(
+                    4,
                     "SB call (vs CO)",
                     Action::Call,
                     ranges.sb_call_vs_utg,
                     None,
                     vec![make_node(
+                        9,
                         "BB call (vs CO+SB)",
                         Action::Call,
                         ranges.bb_call_vs_utg_sb,
@@ -271,6 +322,7 @@ fn build_4max_tree(
                     )],
                 ),
                 make_node(
+                    10,
                     "BB call (vs CO)",
                     Action::Call,
                     ranges.bb_call_vs_utg,
@@ -280,17 +332,20 @@ fn build_4max_tree(
             ],
         ),
         make_node(
+            2,
             "BTN push (CO fold)",
             Action::Raise,
             ranges.btn_push,
             ev(1),
             vec![
                 make_node(
+                    5,
                     "SB call (vs BTN)",
                     Action::Call,
                     ranges.sb_call_vs_btn,
                     None,
                     vec![make_node(
+                        11,
                         "BB call (vs BTN+SB)",
                         Action::CallSpecial,
                         ranges.bb_call_vs_btn_sb,
@@ -299,6 +354,7 @@ fn build_4max_tree(
                     )],
                 ),
                 make_node(
+                    12,
                     "BB call (vs BTN)",
                     Action::Call,
                     ranges.bb_call_vs_btn,
@@ -308,11 +364,13 @@ fn build_4max_tree(
             ],
         ),
         make_node(
+            6,
             "SB push (CO+BTN fold)",
             Action::Raise,
             ranges.sb_push,
             ev(2),
             vec![make_node(
+                13,
                 "BB call (vs SB)",
                 Action::Call,
                 ranges.bb_call_vs_sb,
@@ -354,29 +412,34 @@ fn build_5max_tree(
     let f = |actor: usize, mask: u32| freq_node(ranges, actor, mask);
     vec![
         make_node(
+            five_node(0, 0),
             "HJ push",
             Action::Raise,
             f(0, 0),
             ev(0),
             vec![
                 make_node(
+                    five_node(1, 1),
                     "CO call (vs HJ)",
                     Action::Call,
                     f(1, 1),
                     None,
                     vec![
                         make_node(
+                            five_node(2, 3),
                             "BTN call (vs HJ+CO)",
                             Action::Call,
                             f(2, 3),
                             None,
                             vec![
                                 make_node(
+                                    five_node(3, 7),
                                     "SB call (vs HJ+CO+BTN)",
                                     Action::Call,
                                     f(3, 7),
                                     None,
                                     vec![make_node(
+                                        five_node(4, 15),
                                         "BB call (5-way)",
                                         Action::CallSpecial,
                                         f(4, 15),
@@ -385,6 +448,7 @@ fn build_5max_tree(
                                     )],
                                 ),
                                 make_node(
+                                    five_node(4, 7),
                                     "BB call (vs HJ+CO+BTN)",
                                     Action::Call,
                                     f(4, 7),
@@ -394,11 +458,13 @@ fn build_5max_tree(
                             ],
                         ),
                         make_node(
+                            five_node(3, 3),
                             "SB call (vs HJ+CO)",
                             Action::Call,
                             f(3, 3),
                             None,
                             vec![make_node(
+                                five_node(4, 11),
                                 "BB call (vs HJ+CO+SB)",
                                 Action::Call,
                                 f(4, 11),
@@ -407,6 +473,7 @@ fn build_5max_tree(
                             )],
                         ),
                         make_node(
+                            five_node(4, 3),
                             "BB call (vs HJ+CO)",
                             Action::Call,
                             f(4, 3),
@@ -416,17 +483,20 @@ fn build_5max_tree(
                     ],
                 ),
                 make_node(
+                    five_node(2, 1),
                     "BTN call (vs HJ)",
                     Action::Call,
                     f(2, 1),
                     None,
                     vec![
                         make_node(
+                            five_node(3, 5),
                             "SB call (vs HJ+BTN)",
                             Action::Call,
                             f(3, 5),
                             None,
                             vec![make_node(
+                                five_node(4, 13),
                                 "BB call (vs HJ+BTN+SB)",
                                 Action::Call,
                                 f(4, 13),
@@ -435,6 +505,7 @@ fn build_5max_tree(
                             )],
                         ),
                         make_node(
+                            five_node(4, 5),
                             "BB call (vs HJ+BTN)",
                             Action::Call,
                             f(4, 5),
@@ -444,11 +515,13 @@ fn build_5max_tree(
                     ],
                 ),
                 make_node(
+                    five_node(3, 1),
                     "SB call (vs HJ)",
                     Action::Call,
                     f(3, 1),
                     None,
                     vec![make_node(
+                        five_node(4, 9),
                         "BB call (vs HJ+SB)",
                         Action::Call,
                         f(4, 9),
@@ -457,6 +530,7 @@ fn build_5max_tree(
                     )],
                 ),
                 make_node(
+                    five_node(4, 1),
                     "BB call (vs HJ)",
                     Action::Call,
                     f(4, 1),
@@ -466,23 +540,27 @@ fn build_5max_tree(
             ],
         ),
         make_node(
+            five_node(1, 0),
             "CO push (HJ fold)",
             Action::Raise,
             f(1, 0),
             ev(1),
             vec![
                 make_node(
+                    five_node(2, 2),
                     "BTN call (vs CO)",
                     Action::Call,
                     f(2, 2),
                     None,
                     vec![
                         make_node(
+                            five_node(3, 6),
                             "SB call (vs CO+BTN)",
                             Action::Call,
                             f(3, 6),
                             None,
                             vec![make_node(
+                                five_node(4, 14),
                                 "BB call (vs CO+BTN+SB)",
                                 Action::Call,
                                 f(4, 14),
@@ -491,6 +569,7 @@ fn build_5max_tree(
                             )],
                         ),
                         make_node(
+                            five_node(4, 6),
                             "BB call (vs CO+BTN)",
                             Action::Call,
                             f(4, 6),
@@ -500,11 +579,13 @@ fn build_5max_tree(
                     ],
                 ),
                 make_node(
+                    five_node(3, 2),
                     "SB call (vs CO)",
                     Action::Call,
                     f(3, 2),
                     None,
                     vec![make_node(
+                        five_node(4, 10),
                         "BB call (vs CO+SB)",
                         Action::Call,
                         f(4, 10),
@@ -513,6 +594,7 @@ fn build_5max_tree(
                     )],
                 ),
                 make_node(
+                    five_node(4, 2),
                     "BB call (vs CO)",
                     Action::Call,
                     f(4, 2),
@@ -522,17 +604,20 @@ fn build_5max_tree(
             ],
         ),
         make_node(
+            five_node(2, 0),
             "BTN push (HJ+CO fold)",
             Action::Raise,
             f(2, 0),
             ev(2),
             vec![
                 make_node(
+                    five_node(3, 4),
                     "SB call (vs BTN)",
                     Action::Call,
                     f(3, 4),
                     None,
                     vec![make_node(
+                        five_node(4, 12),
                         "BB call (vs BTN+SB)",
                         Action::CallSpecial,
                         f(4, 12),
@@ -541,6 +626,7 @@ fn build_5max_tree(
                     )],
                 ),
                 make_node(
+                    five_node(4, 4),
                     "BB call (vs BTN)",
                     Action::Call,
                     f(4, 4),
@@ -550,11 +636,13 @@ fn build_5max_tree(
             ],
         ),
         make_node(
+            five_node(3, 0),
             "SB push (folds)",
             Action::Raise,
             f(3, 0),
             ev(3),
             vec![make_node(
+                five_node(4, 8),
                 "BB call (vs SB)",
                 Action::Call,
                 f(4, 8),
@@ -597,57 +685,161 @@ fn build_6max_tree(
     let f = |actor: usize, mask: u32| freq_node6(ranges, actor, mask);
     vec![
         make_node(
+            six_node(0, 0),
             "UTG push",
             Action::Raise,
             f(0, 0),
             ev(0),
             vec![
-                make_node("HJ call (vs UTG)", Action::Call, f(1, 1), None, vec![]),
-                make_node("CO call (vs UTG)", Action::Call, f(2, 1), None, vec![]),
-                make_node("BTN call (vs UTG)", Action::Call, f(3, 1), None, vec![]),
-                make_node("SB call (vs UTG)", Action::Call, f(4, 1), None, vec![]),
-                make_node("BB call (vs UTG)", Action::Call, f(5, 1), None, vec![]),
+                make_node(
+                    six_node(1, 1),
+                    "HJ call (vs UTG)",
+                    Action::Call,
+                    f(1, 1),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    six_node(2, 1),
+                    "CO call (vs UTG)",
+                    Action::Call,
+                    f(2, 1),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    six_node(3, 1),
+                    "BTN call (vs UTG)",
+                    Action::Call,
+                    f(3, 1),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    six_node(4, 1),
+                    "SB call (vs UTG)",
+                    Action::Call,
+                    f(4, 1),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    six_node(5, 1),
+                    "BB call (vs UTG)",
+                    Action::Call,
+                    f(5, 1),
+                    None,
+                    vec![],
+                ),
             ],
         ),
         make_node(
+            six_node(1, 0),
             "HJ push (UTG fold)",
             Action::Raise,
             f(1, 0),
             ev(1),
             vec![
-                make_node("CO call (vs HJ)", Action::Call, f(2, 2), None, vec![]),
-                make_node("BTN call (vs HJ)", Action::Call, f(3, 2), None, vec![]),
-                make_node("SB call (vs HJ)", Action::Call, f(4, 2), None, vec![]),
-                make_node("BB call (vs HJ)", Action::Call, f(5, 2), None, vec![]),
+                make_node(
+                    six_node(2, 2),
+                    "CO call (vs HJ)",
+                    Action::Call,
+                    f(2, 2),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    six_node(3, 2),
+                    "BTN call (vs HJ)",
+                    Action::Call,
+                    f(3, 2),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    six_node(4, 2),
+                    "SB call (vs HJ)",
+                    Action::Call,
+                    f(4, 2),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    six_node(5, 2),
+                    "BB call (vs HJ)",
+                    Action::Call,
+                    f(5, 2),
+                    None,
+                    vec![],
+                ),
             ],
         ),
         make_node(
+            six_node(2, 0),
             "CO push (folds)",
             Action::Raise,
             f(2, 0),
             ev(2),
             vec![
-                make_node("BTN call (vs CO)", Action::Call, f(3, 4), None, vec![]),
-                make_node("SB call (vs CO)", Action::Call, f(4, 4), None, vec![]),
-                make_node("BB call (vs CO)", Action::Call, f(5, 4), None, vec![]),
+                make_node(
+                    six_node(3, 4),
+                    "BTN call (vs CO)",
+                    Action::Call,
+                    f(3, 4),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    six_node(4, 4),
+                    "SB call (vs CO)",
+                    Action::Call,
+                    f(4, 4),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    six_node(5, 4),
+                    "BB call (vs CO)",
+                    Action::Call,
+                    f(5, 4),
+                    None,
+                    vec![],
+                ),
             ],
         ),
         make_node(
+            six_node(3, 0),
             "BTN push (folds)",
             Action::Raise,
             f(3, 0),
             ev(3),
             vec![
-                make_node("SB call (vs BTN)", Action::Call, f(4, 8), None, vec![]),
-                make_node("BB call (vs BTN)", Action::Call, f(5, 8), None, vec![]),
+                make_node(
+                    six_node(4, 8),
+                    "SB call (vs BTN)",
+                    Action::Call,
+                    f(4, 8),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    six_node(5, 8),
+                    "BB call (vs BTN)",
+                    Action::Call,
+                    f(5, 8),
+                    None,
+                    vec![],
+                ),
             ],
         ),
         make_node(
+            six_node(4, 0),
             "SB push (folds)",
             Action::Raise,
             f(4, 0),
             ev(4),
             vec![make_node(
+                six_node(5, 16),
                 "BB call (vs SB)",
                 Action::Call,
                 f(5, 16),
@@ -691,71 +883,218 @@ fn build_7max_tree(
     let f = |actor: usize, mask: u32| freq_node7(ranges, actor, mask);
     vec![
         make_node(
+            seven_node(0, 0),
             "UTG push",
             Action::Raise,
             f(0, 0),
             ev(0),
             vec![
-                make_node("MP call (vs UTG)", Action::Call, f(1, 1), None, vec![]),
-                make_node("HJ call (vs UTG)", Action::Call, f(2, 1), None, vec![]),
-                make_node("CO call (vs UTG)", Action::Call, f(3, 1), None, vec![]),
-                make_node("BTN call (vs UTG)", Action::Call, f(4, 1), None, vec![]),
-                make_node("SB call (vs UTG)", Action::Call, f(5, 1), None, vec![]),
-                make_node("BB call (vs UTG)", Action::Call, f(6, 1), None, vec![]),
+                make_node(
+                    seven_node(1, 1),
+                    "MP call (vs UTG)",
+                    Action::Call,
+                    f(1, 1),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    seven_node(2, 1),
+                    "HJ call (vs UTG)",
+                    Action::Call,
+                    f(2, 1),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    seven_node(3, 1),
+                    "CO call (vs UTG)",
+                    Action::Call,
+                    f(3, 1),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    seven_node(4, 1),
+                    "BTN call (vs UTG)",
+                    Action::Call,
+                    f(4, 1),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    seven_node(5, 1),
+                    "SB call (vs UTG)",
+                    Action::Call,
+                    f(5, 1),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    seven_node(6, 1),
+                    "BB call (vs UTG)",
+                    Action::Call,
+                    f(6, 1),
+                    None,
+                    vec![],
+                ),
             ],
         ),
         make_node(
+            seven_node(1, 0),
             "MP push (UTG fold)",
             Action::Raise,
             f(1, 0),
             ev(1),
             vec![
-                make_node("HJ call (vs MP)", Action::Call, f(2, 2), None, vec![]),
-                make_node("CO call (vs MP)", Action::Call, f(3, 2), None, vec![]),
-                make_node("BTN call (vs MP)", Action::Call, f(4, 2), None, vec![]),
-                make_node("SB call (vs MP)", Action::Call, f(5, 2), None, vec![]),
-                make_node("BB call (vs MP)", Action::Call, f(6, 2), None, vec![]),
+                make_node(
+                    seven_node(2, 2),
+                    "HJ call (vs MP)",
+                    Action::Call,
+                    f(2, 2),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    seven_node(3, 2),
+                    "CO call (vs MP)",
+                    Action::Call,
+                    f(3, 2),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    seven_node(4, 2),
+                    "BTN call (vs MP)",
+                    Action::Call,
+                    f(4, 2),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    seven_node(5, 2),
+                    "SB call (vs MP)",
+                    Action::Call,
+                    f(5, 2),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    seven_node(6, 2),
+                    "BB call (vs MP)",
+                    Action::Call,
+                    f(6, 2),
+                    None,
+                    vec![],
+                ),
             ],
         ),
         make_node(
+            seven_node(2, 0),
             "HJ push (folds)",
             Action::Raise,
             f(2, 0),
             ev(2),
             vec![
-                make_node("CO call (vs HJ)", Action::Call, f(3, 4), None, vec![]),
-                make_node("BTN call (vs HJ)", Action::Call, f(4, 4), None, vec![]),
-                make_node("SB call (vs HJ)", Action::Call, f(5, 4), None, vec![]),
-                make_node("BB call (vs HJ)", Action::Call, f(6, 4), None, vec![]),
+                make_node(
+                    seven_node(3, 4),
+                    "CO call (vs HJ)",
+                    Action::Call,
+                    f(3, 4),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    seven_node(4, 4),
+                    "BTN call (vs HJ)",
+                    Action::Call,
+                    f(4, 4),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    seven_node(5, 4),
+                    "SB call (vs HJ)",
+                    Action::Call,
+                    f(5, 4),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    seven_node(6, 4),
+                    "BB call (vs HJ)",
+                    Action::Call,
+                    f(6, 4),
+                    None,
+                    vec![],
+                ),
             ],
         ),
         make_node(
+            seven_node(3, 0),
             "CO push (folds)",
             Action::Raise,
             f(3, 0),
             ev(3),
             vec![
-                make_node("BTN call (vs CO)", Action::Call, f(4, 8), None, vec![]),
-                make_node("SB call (vs CO)", Action::Call, f(5, 8), None, vec![]),
-                make_node("BB call (vs CO)", Action::Call, f(6, 8), None, vec![]),
+                make_node(
+                    seven_node(4, 8),
+                    "BTN call (vs CO)",
+                    Action::Call,
+                    f(4, 8),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    seven_node(5, 8),
+                    "SB call (vs CO)",
+                    Action::Call,
+                    f(5, 8),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    seven_node(6, 8),
+                    "BB call (vs CO)",
+                    Action::Call,
+                    f(6, 8),
+                    None,
+                    vec![],
+                ),
             ],
         ),
         make_node(
+            seven_node(4, 0),
             "BTN push (folds)",
             Action::Raise,
             f(4, 0),
             ev(4),
             vec![
-                make_node("SB call (vs BTN)", Action::Call, f(5, 16), None, vec![]),
-                make_node("BB call (vs BTN)", Action::Call, f(6, 16), None, vec![]),
+                make_node(
+                    seven_node(5, 16),
+                    "SB call (vs BTN)",
+                    Action::Call,
+                    f(5, 16),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    seven_node(6, 16),
+                    "BB call (vs BTN)",
+                    Action::Call,
+                    f(6, 16),
+                    None,
+                    vec![],
+                ),
             ],
         ),
         make_node(
+            seven_node(5, 0),
             "SB push (folds)",
             Action::Raise,
             f(5, 0),
             ev(5),
             vec![make_node(
+                seven_node(6, 32),
                 "BB call (vs SB)",
                 Action::Call,
                 f(6, 32),
@@ -800,86 +1139,283 @@ fn build_8max_tree(
     let f = |actor: usize, mask: u32| freq_node8(ranges, actor, mask);
     vec![
         make_node(
+            eight_node(0, 0),
             "UTG push",
             Action::Raise,
             f(0, 0),
             ev(0),
             vec![
-                make_node("EP call (vs UTG)", Action::Call, f(1, 1), None, vec![]),
-                make_node("MP call (vs UTG)", Action::Call, f(2, 1), None, vec![]),
-                make_node("HJ call (vs UTG)", Action::Call, f(3, 1), None, vec![]),
-                make_node("CO call (vs UTG)", Action::Call, f(4, 1), None, vec![]),
-                make_node("BTN call (vs UTG)", Action::Call, f(5, 1), None, vec![]),
-                make_node("SB call (vs UTG)", Action::Call, f(6, 1), None, vec![]),
-                make_node("BB call (vs UTG)", Action::Call, f(7, 1), None, vec![]),
+                make_node(
+                    eight_node(1, 1),
+                    "EP call (vs UTG)",
+                    Action::Call,
+                    f(1, 1),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    eight_node(2, 1),
+                    "MP call (vs UTG)",
+                    Action::Call,
+                    f(2, 1),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    eight_node(3, 1),
+                    "HJ call (vs UTG)",
+                    Action::Call,
+                    f(3, 1),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    eight_node(4, 1),
+                    "CO call (vs UTG)",
+                    Action::Call,
+                    f(4, 1),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    eight_node(5, 1),
+                    "BTN call (vs UTG)",
+                    Action::Call,
+                    f(5, 1),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    eight_node(6, 1),
+                    "SB call (vs UTG)",
+                    Action::Call,
+                    f(6, 1),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    eight_node(7, 1),
+                    "BB call (vs UTG)",
+                    Action::Call,
+                    f(7, 1),
+                    None,
+                    vec![],
+                ),
             ],
         ),
         make_node(
+            eight_node(1, 0),
             "EP push (UTG fold)",
             Action::Raise,
             f(1, 0),
             ev(1),
             vec![
-                make_node("MP call (vs EP)", Action::Call, f(2, 2), None, vec![]),
-                make_node("HJ call (vs EP)", Action::Call, f(3, 2), None, vec![]),
-                make_node("CO call (vs EP)", Action::Call, f(4, 2), None, vec![]),
-                make_node("BTN call (vs EP)", Action::Call, f(5, 2), None, vec![]),
-                make_node("SB call (vs EP)", Action::Call, f(6, 2), None, vec![]),
-                make_node("BB call (vs EP)", Action::Call, f(7, 2), None, vec![]),
+                make_node(
+                    eight_node(2, 2),
+                    "MP call (vs EP)",
+                    Action::Call,
+                    f(2, 2),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    eight_node(3, 2),
+                    "HJ call (vs EP)",
+                    Action::Call,
+                    f(3, 2),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    eight_node(4, 2),
+                    "CO call (vs EP)",
+                    Action::Call,
+                    f(4, 2),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    eight_node(5, 2),
+                    "BTN call (vs EP)",
+                    Action::Call,
+                    f(5, 2),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    eight_node(6, 2),
+                    "SB call (vs EP)",
+                    Action::Call,
+                    f(6, 2),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    eight_node(7, 2),
+                    "BB call (vs EP)",
+                    Action::Call,
+                    f(7, 2),
+                    None,
+                    vec![],
+                ),
             ],
         ),
         make_node(
+            eight_node(2, 0),
             "MP push (folds)",
             Action::Raise,
             f(2, 0),
             ev(2),
             vec![
-                make_node("HJ call (vs MP)", Action::Call, f(3, 4), None, vec![]),
-                make_node("CO call (vs MP)", Action::Call, f(4, 4), None, vec![]),
-                make_node("BTN call (vs MP)", Action::Call, f(5, 4), None, vec![]),
-                make_node("SB call (vs MP)", Action::Call, f(6, 4), None, vec![]),
-                make_node("BB call (vs MP)", Action::Call, f(7, 4), None, vec![]),
+                make_node(
+                    eight_node(3, 4),
+                    "HJ call (vs MP)",
+                    Action::Call,
+                    f(3, 4),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    eight_node(4, 4),
+                    "CO call (vs MP)",
+                    Action::Call,
+                    f(4, 4),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    eight_node(5, 4),
+                    "BTN call (vs MP)",
+                    Action::Call,
+                    f(5, 4),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    eight_node(6, 4),
+                    "SB call (vs MP)",
+                    Action::Call,
+                    f(6, 4),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    eight_node(7, 4),
+                    "BB call (vs MP)",
+                    Action::Call,
+                    f(7, 4),
+                    None,
+                    vec![],
+                ),
             ],
         ),
         make_node(
+            eight_node(3, 0),
             "HJ push (folds)",
             Action::Raise,
             f(3, 0),
             ev(3),
             vec![
-                make_node("CO call (vs HJ)", Action::Call, f(4, 8), None, vec![]),
-                make_node("BTN call (vs HJ)", Action::Call, f(5, 8), None, vec![]),
-                make_node("SB call (vs HJ)", Action::Call, f(6, 8), None, vec![]),
-                make_node("BB call (vs HJ)", Action::Call, f(7, 8), None, vec![]),
+                make_node(
+                    eight_node(4, 8),
+                    "CO call (vs HJ)",
+                    Action::Call,
+                    f(4, 8),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    eight_node(5, 8),
+                    "BTN call (vs HJ)",
+                    Action::Call,
+                    f(5, 8),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    eight_node(6, 8),
+                    "SB call (vs HJ)",
+                    Action::Call,
+                    f(6, 8),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    eight_node(7, 8),
+                    "BB call (vs HJ)",
+                    Action::Call,
+                    f(7, 8),
+                    None,
+                    vec![],
+                ),
             ],
         ),
         make_node(
+            eight_node(4, 0),
             "CO push (folds)",
             Action::Raise,
             f(4, 0),
             ev(4),
             vec![
-                make_node("BTN call (vs CO)", Action::Call, f(5, 16), None, vec![]),
-                make_node("SB call (vs CO)", Action::Call, f(6, 16), None, vec![]),
-                make_node("BB call (vs CO)", Action::Call, f(7, 16), None, vec![]),
+                make_node(
+                    eight_node(5, 16),
+                    "BTN call (vs CO)",
+                    Action::Call,
+                    f(5, 16),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    eight_node(6, 16),
+                    "SB call (vs CO)",
+                    Action::Call,
+                    f(6, 16),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    eight_node(7, 16),
+                    "BB call (vs CO)",
+                    Action::Call,
+                    f(7, 16),
+                    None,
+                    vec![],
+                ),
             ],
         ),
         make_node(
+            eight_node(5, 0),
             "BTN push (folds)",
             Action::Raise,
             f(5, 0),
             ev(5),
             vec![
-                make_node("SB call (vs BTN)", Action::Call, f(6, 32), None, vec![]),
-                make_node("BB call (vs BTN)", Action::Call, f(7, 32), None, vec![]),
+                make_node(
+                    eight_node(6, 32),
+                    "SB call (vs BTN)",
+                    Action::Call,
+                    f(6, 32),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    eight_node(7, 32),
+                    "BB call (vs BTN)",
+                    Action::Call,
+                    f(7, 32),
+                    None,
+                    vec![],
+                ),
             ],
         ),
         make_node(
+            eight_node(6, 0),
             "SB push (folds)",
             Action::Raise,
             f(6, 0),
             ev(6),
             vec![make_node(
+                eight_node(7, 64),
                 "BB call (vs SB)",
                 Action::Call,
                 f(7, 64),
@@ -925,102 +1461,356 @@ fn build_9max_tree(
     let f = |actor: usize, mask: u32| freq_node9(ranges, actor, mask);
     vec![
         make_node(
+            nine_node(0, 0),
             "UTG push",
             Action::Raise,
             f(0, 0),
             ev(0),
             vec![
-                make_node("EP call (vs UTG)", Action::Call, f(1, 1), None, vec![]),
-                make_node("MP1 call (vs UTG)", Action::Call, f(2, 1), None, vec![]),
-                make_node("MP2 call (vs UTG)", Action::Call, f(3, 1), None, vec![]),
-                make_node("HJ call (vs UTG)", Action::Call, f(4, 1), None, vec![]),
-                make_node("CO call (vs UTG)", Action::Call, f(5, 1), None, vec![]),
-                make_node("BTN call (vs UTG)", Action::Call, f(6, 1), None, vec![]),
-                make_node("SB call (vs UTG)", Action::Call, f(7, 1), None, vec![]),
-                make_node("BB call (vs UTG)", Action::Call, f(8, 1), None, vec![]),
+                make_node(
+                    nine_node(1, 1),
+                    "EP call (vs UTG)",
+                    Action::Call,
+                    f(1, 1),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    nine_node(2, 1),
+                    "MP1 call (vs UTG)",
+                    Action::Call,
+                    f(2, 1),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    nine_node(3, 1),
+                    "MP2 call (vs UTG)",
+                    Action::Call,
+                    f(3, 1),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    nine_node(4, 1),
+                    "HJ call (vs UTG)",
+                    Action::Call,
+                    f(4, 1),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    nine_node(5, 1),
+                    "CO call (vs UTG)",
+                    Action::Call,
+                    f(5, 1),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    nine_node(6, 1),
+                    "BTN call (vs UTG)",
+                    Action::Call,
+                    f(6, 1),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    nine_node(7, 1),
+                    "SB call (vs UTG)",
+                    Action::Call,
+                    f(7, 1),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    nine_node(8, 1),
+                    "BB call (vs UTG)",
+                    Action::Call,
+                    f(8, 1),
+                    None,
+                    vec![],
+                ),
             ],
         ),
         make_node(
+            nine_node(1, 0),
             "EP push (UTG fold)",
             Action::Raise,
             f(1, 0),
             ev(1),
             vec![
-                make_node("MP1 call (vs EP)", Action::Call, f(2, 2), None, vec![]),
-                make_node("MP2 call (vs EP)", Action::Call, f(3, 2), None, vec![]),
-                make_node("HJ call (vs EP)", Action::Call, f(4, 2), None, vec![]),
-                make_node("CO call (vs EP)", Action::Call, f(5, 2), None, vec![]),
-                make_node("BTN call (vs EP)", Action::Call, f(6, 2), None, vec![]),
-                make_node("SB call (vs EP)", Action::Call, f(7, 2), None, vec![]),
-                make_node("BB call (vs EP)", Action::Call, f(8, 2), None, vec![]),
+                make_node(
+                    nine_node(2, 2),
+                    "MP1 call (vs EP)",
+                    Action::Call,
+                    f(2, 2),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    nine_node(3, 2),
+                    "MP2 call (vs EP)",
+                    Action::Call,
+                    f(3, 2),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    nine_node(4, 2),
+                    "HJ call (vs EP)",
+                    Action::Call,
+                    f(4, 2),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    nine_node(5, 2),
+                    "CO call (vs EP)",
+                    Action::Call,
+                    f(5, 2),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    nine_node(6, 2),
+                    "BTN call (vs EP)",
+                    Action::Call,
+                    f(6, 2),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    nine_node(7, 2),
+                    "SB call (vs EP)",
+                    Action::Call,
+                    f(7, 2),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    nine_node(8, 2),
+                    "BB call (vs EP)",
+                    Action::Call,
+                    f(8, 2),
+                    None,
+                    vec![],
+                ),
             ],
         ),
         make_node(
+            nine_node(2, 0),
             "MP1 push (folds)",
             Action::Raise,
             f(2, 0),
             ev(2),
             vec![
-                make_node("MP2 call (vs MP1)", Action::Call, f(3, 4), None, vec![]),
-                make_node("HJ call (vs MP1)", Action::Call, f(4, 4), None, vec![]),
-                make_node("CO call (vs MP1)", Action::Call, f(5, 4), None, vec![]),
-                make_node("BTN call (vs MP1)", Action::Call, f(6, 4), None, vec![]),
-                make_node("SB call (vs MP1)", Action::Call, f(7, 4), None, vec![]),
-                make_node("BB call (vs MP1)", Action::Call, f(8, 4), None, vec![]),
+                make_node(
+                    nine_node(3, 4),
+                    "MP2 call (vs MP1)",
+                    Action::Call,
+                    f(3, 4),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    nine_node(4, 4),
+                    "HJ call (vs MP1)",
+                    Action::Call,
+                    f(4, 4),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    nine_node(5, 4),
+                    "CO call (vs MP1)",
+                    Action::Call,
+                    f(5, 4),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    nine_node(6, 4),
+                    "BTN call (vs MP1)",
+                    Action::Call,
+                    f(6, 4),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    nine_node(7, 4),
+                    "SB call (vs MP1)",
+                    Action::Call,
+                    f(7, 4),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    nine_node(8, 4),
+                    "BB call (vs MP1)",
+                    Action::Call,
+                    f(8, 4),
+                    None,
+                    vec![],
+                ),
             ],
         ),
         make_node(
+            nine_node(3, 0),
             "MP2 push (folds)",
             Action::Raise,
             f(3, 0),
             ev(3),
             vec![
-                make_node("HJ call (vs MP2)", Action::Call, f(4, 8), None, vec![]),
-                make_node("CO call (vs MP2)", Action::Call, f(5, 8), None, vec![]),
-                make_node("BTN call (vs MP2)", Action::Call, f(6, 8), None, vec![]),
-                make_node("SB call (vs MP2)", Action::Call, f(7, 8), None, vec![]),
-                make_node("BB call (vs MP2)", Action::Call, f(8, 8), None, vec![]),
+                make_node(
+                    nine_node(4, 8),
+                    "HJ call (vs MP2)",
+                    Action::Call,
+                    f(4, 8),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    nine_node(5, 8),
+                    "CO call (vs MP2)",
+                    Action::Call,
+                    f(5, 8),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    nine_node(6, 8),
+                    "BTN call (vs MP2)",
+                    Action::Call,
+                    f(6, 8),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    nine_node(7, 8),
+                    "SB call (vs MP2)",
+                    Action::Call,
+                    f(7, 8),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    nine_node(8, 8),
+                    "BB call (vs MP2)",
+                    Action::Call,
+                    f(8, 8),
+                    None,
+                    vec![],
+                ),
             ],
         ),
         make_node(
+            nine_node(4, 0),
             "HJ push (folds)",
             Action::Raise,
             f(4, 0),
             ev(4),
             vec![
-                make_node("CO call (vs HJ)", Action::Call, f(5, 16), None, vec![]),
-                make_node("BTN call (vs HJ)", Action::Call, f(6, 16), None, vec![]),
-                make_node("SB call (vs HJ)", Action::Call, f(7, 16), None, vec![]),
-                make_node("BB call (vs HJ)", Action::Call, f(8, 16), None, vec![]),
+                make_node(
+                    nine_node(5, 16),
+                    "CO call (vs HJ)",
+                    Action::Call,
+                    f(5, 16),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    nine_node(6, 16),
+                    "BTN call (vs HJ)",
+                    Action::Call,
+                    f(6, 16),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    nine_node(7, 16),
+                    "SB call (vs HJ)",
+                    Action::Call,
+                    f(7, 16),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    nine_node(8, 16),
+                    "BB call (vs HJ)",
+                    Action::Call,
+                    f(8, 16),
+                    None,
+                    vec![],
+                ),
             ],
         ),
         make_node(
+            nine_node(5, 0),
             "CO push (folds)",
             Action::Raise,
             f(5, 0),
             ev(5),
             vec![
-                make_node("BTN call (vs CO)", Action::Call, f(6, 32), None, vec![]),
-                make_node("SB call (vs CO)", Action::Call, f(7, 32), None, vec![]),
-                make_node("BB call (vs CO)", Action::Call, f(8, 32), None, vec![]),
+                make_node(
+                    nine_node(6, 32),
+                    "BTN call (vs CO)",
+                    Action::Call,
+                    f(6, 32),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    nine_node(7, 32),
+                    "SB call (vs CO)",
+                    Action::Call,
+                    f(7, 32),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    nine_node(8, 32),
+                    "BB call (vs CO)",
+                    Action::Call,
+                    f(8, 32),
+                    None,
+                    vec![],
+                ),
             ],
         ),
         make_node(
+            nine_node(6, 0),
             "BTN push (folds)",
             Action::Raise,
             f(6, 0),
             ev(6),
             vec![
-                make_node("SB call (vs BTN)", Action::Call, f(7, 64), None, vec![]),
-                make_node("BB call (vs BTN)", Action::Call, f(8, 64), None, vec![]),
+                make_node(
+                    nine_node(7, 64),
+                    "SB call (vs BTN)",
+                    Action::Call,
+                    f(7, 64),
+                    None,
+                    vec![],
+                ),
+                make_node(
+                    nine_node(8, 64),
+                    "BB call (vs BTN)",
+                    Action::Call,
+                    f(8, 64),
+                    None,
+                    vec![],
+                ),
             ],
         ),
         make_node(
+            nine_node(7, 0),
             "SB push (folds)",
             Action::Raise,
             f(7, 0),
             ev(7),
             vec![make_node(
+                nine_node(8, 128),
                 "BB call (vs SB)",
                 Action::Call,
                 f(8, 128),
@@ -1033,11 +1823,13 @@ fn build_9max_tree(
 
 fn build_hu_tree(output: &SolverOutput) -> Vec<TreeNode> {
     vec![make_node(
+        0,
         "SB push",
         Action::Raise,
         output.push_ranges[0],
         output.hand_evs.get(0).copied(),
         vec![make_node(
+            1,
             "BB call",
             Action::Call,
             output.call_ranges[1],

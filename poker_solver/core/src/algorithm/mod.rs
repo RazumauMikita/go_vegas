@@ -1,4 +1,38 @@
-use crate::solver::{SolverInput, SolverOutput};
+use crate::solver::{SolverInput, SolverOutput, HAND_TYPES};
+
+pub(crate) fn set_locked_strategy(range: &[f64; HAND_TYPES], dest: &mut [[f64; 2]; HAND_TYPES]) {
+    for h in 0..HAND_TYPES {
+        let p = range[h].clamp(0.0, 1.0);
+        dest[h] = [p, 1.0 - p];
+    }
+}
+
+pub(crate) fn apply_locked_strategies(
+    input: &SolverInput,
+    strategy: &mut [[[f64; 2]; HAND_TYPES]],
+) {
+    for (&id, range) in &input.locked_ranges {
+        if let Some(node) = strategy.get_mut(id) {
+            set_locked_strategy(range, node);
+        }
+    }
+}
+
+pub(crate) fn overlay_locked_freqs(input: &SolverInput, freq: &mut [[f64; HAND_TYPES]]) {
+    for (&id, range) in &input.locked_ranges {
+        if let Some(slot) = freq.get_mut(id) {
+            *slot = *range;
+        }
+    }
+}
+
+pub(crate) fn initial_locked_range(input: &SolverInput, id: usize, fill: f64) -> [f64; HAND_TYPES] {
+    input
+        .locked_ranges
+        .get(&id)
+        .copied()
+        .unwrap_or([fill; HAND_TYPES])
+}
 
 pub mod cfr;
 pub mod cfr_3max;

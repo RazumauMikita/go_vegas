@@ -57,6 +57,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
         profile: config.profile,
         algorithm: config.algorithm,
         rank_cache_strict: config.rank_cache_strict,
+        locked_ranges: std::collections::HashMap::new(),
     };
 
     let started = std::time::Instant::now();
@@ -287,6 +288,7 @@ fn run_debug_bb(config: &Config, hand_label: &str) -> Result<(), String> {
         profile: false,
         algorithm: Algorithm::FictitiousPlay,
         rank_cache_strict: config.rank_cache_strict,
+        locked_ranges: std::collections::HashMap::new(),
     };
     let report = poker_core::debug_bb_report(&input, &cache, hand_label, 0.65, 0.21)?;
     println!("{report}");

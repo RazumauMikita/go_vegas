@@ -59,12 +59,12 @@ pub(crate) fn solve_3max(input: &SolverInput, cache: &EquityCache) -> SolverOutp
         return empty_output(input.stacks.len());
     };
 
-    let mut btn_push = [1.0; HAND_TYPES];
-    let mut sb_call_vs_btn = [1.0; HAND_TYPES];
-    let mut bb_call_vs_btn = [1.0; HAND_TYPES];
-    let mut bb_call_vs_both = [1.0; HAND_TYPES];
-    let mut sb_push = [1.0; HAND_TYPES];
-    let mut bb_call_vs_sb = [1.0; HAND_TYPES];
+    let mut btn_push = crate::algorithm::initial_locked_range(input, 0, 1.0);
+    let mut sb_call_vs_btn = crate::algorithm::initial_locked_range(input, 1, 1.0);
+    let mut bb_call_vs_btn = crate::algorithm::initial_locked_range(input, 2, 1.0);
+    let mut bb_call_vs_both = crate::algorithm::initial_locked_range(input, 3, 1.0);
+    let mut sb_push = crate::algorithm::initial_locked_range(input, 4, 1.0);
+    let mut bb_call_vs_sb = crate::algorithm::initial_locked_range(input, 5, 1.0);
 
     if input.profile {
         let init_icm = icm_equity_call_count();
@@ -150,40 +150,48 @@ pub(crate) fn solve_3max(input: &SolverInput, cache: &EquityCache) -> SolverOutp
         let mut push_change = 0.0;
         let mut call_change = 0.0;
         for hand in 0..HAND_TYPES {
-            sum_btn_push[hand] += br_btn_push[hand];
-            sum_sb_call[hand] += br_sb_call[hand];
-            sum_bb_vs_btn[hand] += br_bb_vs_btn[hand];
-            sum_bb_vs_both[hand] += br_bb_vs_both[hand];
-            sum_sb_push[hand] += br_sb_push[hand];
-            sum_bb_vs_sb[hand] += br_bb_vs_sb[hand];
-
-            let next_btn = sum_btn_push[hand] / t;
-            let next_sb_call = sum_sb_call[hand] / t;
-            let next_bb_btn = sum_bb_vs_btn[hand] / t;
-            let next_bb_both = sum_bb_vs_both[hand] / t;
-            let next_sb_push = sum_sb_push[hand] / t;
-            let next_bb_sb = sum_bb_vs_sb[hand] / t;
-
-            change += (next_btn - btn_push[hand]).abs();
-            change += (next_sb_call - sb_call_vs_btn[hand]).abs();
-            change += (next_bb_btn - bb_call_vs_btn[hand]).abs();
-            change += (next_bb_both - bb_call_vs_both[hand]).abs();
-            change += (next_sb_push - sb_push[hand]).abs();
-            change += (next_bb_sb - bb_call_vs_sb[hand]).abs();
-
-            push_change += (next_btn - btn_push[hand]).abs();
-            push_change += (next_sb_push - sb_push[hand]).abs();
-            call_change += (next_sb_call - sb_call_vs_btn[hand]).abs();
-            call_change += (next_bb_btn - bb_call_vs_btn[hand]).abs();
-            call_change += (next_bb_both - bb_call_vs_both[hand]).abs();
-            call_change += (next_bb_sb - bb_call_vs_sb[hand]).abs();
-
-            btn_push[hand] = next_btn;
-            sb_call_vs_btn[hand] = next_sb_call;
-            bb_call_vs_btn[hand] = next_bb_btn;
-            bb_call_vs_both[hand] = next_bb_both;
-            sb_push[hand] = next_sb_push;
-            bb_call_vs_sb[hand] = next_bb_sb;
+            if !input.is_locked(0) {
+                sum_btn_push[hand] += br_btn_push[hand];
+                let next_btn = sum_btn_push[hand] / t;
+                change += (next_btn - btn_push[hand]).abs();
+                push_change += (next_btn - btn_push[hand]).abs();
+                btn_push[hand] = next_btn;
+            }
+            if !input.is_locked(1) {
+                sum_sb_call[hand] += br_sb_call[hand];
+                let next_sb_call = sum_sb_call[hand] / t;
+                change += (next_sb_call - sb_call_vs_btn[hand]).abs();
+                call_change += (next_sb_call - sb_call_vs_btn[hand]).abs();
+                sb_call_vs_btn[hand] = next_sb_call;
+            }
+            if !input.is_locked(2) {
+                sum_bb_vs_btn[hand] += br_bb_vs_btn[hand];
+                let next_bb_btn = sum_bb_vs_btn[hand] / t;
+                change += (next_bb_btn - bb_call_vs_btn[hand]).abs();
+                call_change += (next_bb_btn - bb_call_vs_btn[hand]).abs();
+                bb_call_vs_btn[hand] = next_bb_btn;
+            }
+            if !input.is_locked(3) {
+                sum_bb_vs_both[hand] += br_bb_vs_both[hand];
+                let next_bb_both = sum_bb_vs_both[hand] / t;
+                change += (next_bb_both - bb_call_vs_both[hand]).abs();
+                call_change += (next_bb_both - bb_call_vs_both[hand]).abs();
+                bb_call_vs_both[hand] = next_bb_both;
+            }
+            if !input.is_locked(4) {
+                sum_sb_push[hand] += br_sb_push[hand];
+                let next_sb_push = sum_sb_push[hand] / t;
+                change += (next_sb_push - sb_push[hand]).abs();
+                push_change += (next_sb_push - sb_push[hand]).abs();
+                sb_push[hand] = next_sb_push;
+            }
+            if !input.is_locked(5) {
+                sum_bb_vs_sb[hand] += br_bb_vs_sb[hand];
+                let next_bb_sb = sum_bb_vs_sb[hand] / t;
+                change += (next_bb_sb - bb_call_vs_sb[hand]).abs();
+                call_change += (next_bb_sb - bb_call_vs_sb[hand]).abs();
+                bb_call_vs_sb[hand] = next_bb_sb;
+            }
         }
 
         let mean_change = change / (6.0 * HAND_TYPES as f64);
@@ -1812,6 +1820,7 @@ mod tests {
             profile: false,
             algorithm: crate::solver::Algorithm::FictitiousPlay,
             rank_cache_strict: false,
+            locked_ranges: std::collections::HashMap::new(),
         };
         let ctx = ThreeMaxContext::new(&input, ThreeWayRankCache::new()).expect("ctx");
         assert_eq!(ctx.all_in_stacks, [900.0, 500.0, 900.0]);
@@ -1834,6 +1843,7 @@ mod tests {
             profile: false,
             algorithm: crate::solver::Algorithm::FictitiousPlay,
             rank_cache_strict: false,
+            locked_ranges: std::collections::HashMap::new(),
         };
         let ctx = ThreeMaxContext::new(&input, ThreeWayRankCache::new()).expect("ctx");
         let ones = [1.0; HAND_TYPES];

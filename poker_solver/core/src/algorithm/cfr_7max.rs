@@ -342,7 +342,7 @@ impl Cfr7Max {
     pub fn init(input: &SolverInput, cache: &EquityCache) -> Option<Self> {
         let solve_started = Instant::now();
         let model = Model::build(input, cache)?;
-        Some(Self {
+        let mut solver = Self {
             input: input.clone(),
             model,
             regret: vec![[[0.0; 2]; HAND_TYPES]; NODES],
@@ -354,7 +354,9 @@ impl Cfr7Max {
             iterations_done: 0,
             has_converged: false,
             solve_started,
-        })
+        };
+        crate::algorithm::apply_locked_strategies(&solver.input, &mut solver.strategy);
+        Some(solver)
     }
 
     pub fn run(input: &SolverInput, cache: &EquityCache) -> SolverOutput {
@@ -366,10 +368,14 @@ impl Cfr7Max {
 
     fn recompute_strategies(&mut self) {
         for node in 0..NODES {
+            if self.input.is_locked(node) {
+                continue;
+            }
             for h in 0..HAND_TYPES {
                 regret_match(&self.regret[node][h], &mut self.strategy[node][h]);
             }
         }
+        crate::algorithm::apply_locked_strategies(&self.input, &mut self.strategy);
     }
 
     fn frequencies(&self) -> Vec<[f64; HAND_TYPES]> {
@@ -379,6 +385,7 @@ impl Cfr7Max {
                 freq[node][h] = self.strategy[node][h][0];
             }
         }
+        crate::algorithm::overlay_locked_freqs(&self.input, &mut freq);
         freq
     }
 
@@ -403,6 +410,7 @@ impl Cfr7Max {
                 freq[node][h] = (self.sum[node][h] / self.weight_sum).clamp(0.0, 1.0);
             }
         }
+        crate::algorithm::overlay_locked_freqs(&self.input, &mut freq);
         freq
     }
 
@@ -420,11 +428,16 @@ impl SolverAlgorithm for Cfr7Max {
         let terminals = self.model.terminals(&freq);
         let t = (self.iterations_done + 1) as f64;
 
+        let locked: std::collections::HashSet<usize> =
+            self.input.locked_ranges.keys().copied().collect();
         self.regret
             .par_iter_mut()
             .zip(self.strategy.par_iter())
             .enumerate()
             .for_each(|(node, (regret, strategy))| {
+                if locked.contains(&node) {
+                    return;
+                }
                 for hand in 0..HAND_TYPES {
                     let ev = action_ev(node, hand, &opp, &terminals);
                     dcfr(
@@ -463,10 +476,7 @@ impl SolverAlgorithm for Cfr7Max {
             self.has_converged = true;
         }
 
-        if self.iterations_done == 1
-            || self.iterations_done % 25 == 0
-            || self.has_converged
-        {
+        if self.iterations_done == 1 || self.iterations_done % 25 == 0 || self.has_converged {
             eprintln!(
                 "Iter {}: {:.2}s last_mean={:.6} avg_mean={:.6}",
                 self.iterations_done,
@@ -661,12 +671,7 @@ fn reach_of(node: usize, hand: usize, opp: &[[f64; HAND_TYPES]]) -> f64 {
     p
 }
 
-fn action_ev(
-    node: usize,
-    h: usize,
-    opp: &[[f64; HAND_TYPES]],
-    t: &Terminals,
-) -> (f64, f64) {
+fn action_ev(node: usize, h: usize, opp: &[[f64; HAND_TYPES]], t: &Terminals) -> (f64, f64) {
     let (actor, mask) = parse_node(node);
     let push = cont(actor + 1, mask | (1 << actor), actor, h, opp, t);
     let fold = cont(actor + 1, mask, actor, h, opp, t);
@@ -862,9 +867,13 @@ impl Model {
                 }
                 7 => {
                     let (contested, uncalled) = effective7(base);
-                    seven_icm.par_iter_mut().enumerate().for_each(|(perm, row)| {
-                        *row = icm7(&apply_permutation_7way(perm, contested, uncalled), payouts);
-                    });
+                    seven_icm
+                        .par_iter_mut()
+                        .enumerate()
+                        .for_each(|(perm, row)| {
+                            *row =
+                                icm7(&apply_permutation_7way(perm, contested, uncalled), payouts);
+                        });
                 }
                 _ => {}
             }
@@ -1817,6 +1826,7 @@ mod tests {
             profile: false,
             algorithm: Algorithm::Cfr7Max,
             rank_cache_strict: false,
+            locked_ranges: std::collections::HashMap::new(),
         }
     }
 
