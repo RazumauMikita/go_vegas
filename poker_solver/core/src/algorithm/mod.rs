@@ -6,6 +6,7 @@ pub mod cfr_4max;
 pub mod cfr_5max;
 pub mod cfr_6max;
 pub mod cfr_7max;
+pub mod cfr_8max;
 pub mod fp;
 
 pub use cfr::CfrSolver;
@@ -14,6 +15,7 @@ pub use cfr_4max::Cfr4Max;
 pub use cfr_5max::Cfr5Max;
 pub use cfr_6max::Cfr6Max;
 pub use cfr_7max::Cfr7Max;
+pub use cfr_8max::Cfr8Max;
 pub use fp::FictitiousPlay;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -26,6 +28,7 @@ pub enum Algorithm {
     Cfr5Max,
     Cfr6Max,
     Cfr7Max,
+    Cfr8Max,
 }
 
 impl Algorithm {
@@ -38,6 +41,7 @@ impl Algorithm {
             Self::Cfr5Max => "cfr-5max",
             Self::Cfr6Max => "cfr-6max",
             Self::Cfr7Max => "cfr-7max",
+            Self::Cfr8Max => "cfr-8max",
         }
     }
 }
@@ -54,8 +58,9 @@ impl std::str::FromStr for Algorithm {
             "cfr-5max" => Ok(Self::Cfr5Max),
             "cfr-6max" => Ok(Self::Cfr6Max),
             "cfr-7max" => Ok(Self::Cfr7Max),
+            "cfr-8max" => Ok(Self::Cfr8Max),
             other => Err(format!(
-                "unknown algorithm: {other} (expected fp, cfr, cfr-3max, cfr-4max, cfr-5max, cfr-6max, or cfr-7max)"
+                "unknown algorithm: {other} (expected fp, cfr, cfr-3max, cfr-4max, cfr-5max, cfr-6max, cfr-7max, or cfr-8max)"
             )),
         }
     }
@@ -85,6 +90,7 @@ pub fn dispatch(input: &SolverInput, cache: &crate::equity_cache::EquityCache) -
         | Algorithm::Cfr4Max
         | Algorithm::Cfr5Max
         | Algorithm::Cfr6Max
-        | Algorithm::Cfr7Max => CfrSolver::run(input, cache),
+        | Algorithm::Cfr7Max
+        | Algorithm::Cfr8Max => CfrSolver::run(input, cache),
     }
 }

@@ -485,6 +485,7 @@ impl SolverAlgorithm for Cfr6Max {
             five_max: None,
             six_max: Some(SixMaxRanges { freq }),
             seven_max: None,
+            eight_max: None,
         }
     }
 }
