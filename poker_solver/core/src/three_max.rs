@@ -316,6 +316,7 @@ pub(crate) fn build_three_max_output(
         three_max_hand_evs: Some(three_max_hand_evs),
         four_max: None,
         five_max: None,
+        six_max: None,
     }
 }
 

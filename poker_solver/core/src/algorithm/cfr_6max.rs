@@ -13,8 +13,8 @@ use crate::equity_3way::{apply_permutation, RANK_PERMUTATIONS as PERM3};
 use crate::equity_cache::{expand_combo, EquityCache};
 use crate::four_way_rank_cache::FourWayRankCache;
 use crate::solver::{
-    empty_output, five_node, tournament_equity, FiveMaxRanges, SolverInput, SolverOutput,
-    FIVE_MAX_NODES, HAND_EV_SCALE, HAND_TYPES,
+    empty_output, six_node, tournament_equity, SixMaxRanges, SolverInput, SolverOutput,
+    HAND_EV_SCALE, HAND_TYPES, SIX_MAX_NODES,
 };
 use crate::three_way_rank_cache::ThreeWayRankCache;
 
@@ -24,11 +24,11 @@ const DCFR_ALPHA: f64 = 1.5;
 const DCFR_BETA: f64 = 0.5;
 const DCFR_GAMMA: f64 = 1.0;
 const BUCKETS: usize = NUM_BUCKETS;
-const NODES: usize = FIVE_MAX_NODES;
+const NODES: usize = SIX_MAX_NODES;
 const LIVE: f64 = 1e-12;
-const PLAYERS: usize = 5;
+const PLAYERS: usize = 6;
 
-pub struct Cfr5Max {
+pub struct Cfr6Max {
     input: SolverInput,
     model: Model,
     regret: Vec<[[f64; 2]; HAND_TYPES]>,
@@ -44,11 +44,12 @@ pub struct Cfr5Max {
 
 struct Model {
     map: [usize; PLAYERS],
-    walk: [[f64; PLAYERS]; 32],
+    walk: [[f64; PLAYERS]; 64],
     hus: Vec<HuTerm>,
     threes: Vec<ThreeTerm>,
     fours: Vec<FourTerm>,
-    five_icm: [[f64; PLAYERS]; 120],
+    fives: Vec<FiveTerm>,
+    six_icm: Vec<[f64; PLAYERS]>,
     four_cache: FourWayRankCache,
     bucket_eq: [[f64; BUCKETS]; BUCKETS],
 }
@@ -71,6 +72,13 @@ struct FourTerm {
     mask: u32,
     seats: [usize; 4],
     icm: [[f64; PLAYERS]; 24],
+}
+
+struct FiveTerm {
+    mask: u32,
+    seats: [usize; 5],
+    folder: usize,
+    icm: Vec<[f64; PLAYERS]>,
 }
 
 struct Terminals {
@@ -164,17 +172,95 @@ fn fill_perms(cur: &mut [usize; 5], k: usize, out: &mut [[usize; 5]; 120], n: &m
     }
 }
 
+pub fn apply_permutation_6way(perm: usize, contested: [f64; 6], uncalled: [f64; 6]) -> [f64; 6] {
+    let order = perm6()[perm.min(719)];
+    let mut score = [0_u8; 6];
+    for (place, &player) in order.iter().enumerate() {
+        score[player] = (5 - place) as u8;
+    }
+
+    let mut levels = contested;
+    levels.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mut unique = [0.0; 6];
+    let mut n_unique = 0;
+    for level in levels {
+        if level <= 0.0 {
+            continue;
+        }
+        if n_unique == 0 || unique[n_unique - 1] != level {
+            unique[n_unique] = level;
+            n_unique += 1;
+        }
+    }
+
+    let mut won = [0.0; 6];
+    let mut prev = 0.0;
+    for level in unique.into_iter().take(n_unique) {
+        let mut best = 0_u8;
+        let mut n_in = 0_u32;
+        let mut in_pot = [false; 6];
+        for i in 0..6 {
+            if contested[i] >= level {
+                in_pot[i] = true;
+                n_in += 1;
+                best = best.max(score[i]);
+            }
+        }
+        if n_in == 0 {
+            prev = level;
+            continue;
+        }
+        let pot = (level - prev) * f64::from(n_in);
+        for i in 0..6 {
+            if in_pot[i] && score[i] == best {
+                won[i] += pot;
+                break;
+            }
+        }
+        prev = level;
+    }
+    for i in 0..6 {
+        won[i] += uncalled[i];
+    }
+    won
+}
+
+fn perm6() -> &'static [[usize; 6]; 720] {
+    static P: OnceLock<[[usize; 6]; 720]> = OnceLock::new();
+    P.get_or_init(|| {
+        let mut out = [[0usize; 6]; 720];
+        let mut n = 0;
+        let mut cur = [0, 1, 2, 3, 4, 5];
+        fill_perms6(&mut cur, 0, &mut out, &mut n);
+        out
+    })
+}
+
+fn fill_perms6(cur: &mut [usize; 6], k: usize, out: &mut [[usize; 6]; 720], n: &mut usize) {
+    if k == 6 {
+        out[*n] = *cur;
+        *n += 1;
+        return;
+    }
+    for i in k..6 {
+        cur.swap(k, i);
+        fill_perms6(cur, k + 1, out, n);
+        cur.swap(k, i);
+    }
+}
+
 fn parse_node(node: usize) -> (usize, u32) {
     match node {
         0 => (0, 0),
         1 | 2 => (1, (node - 1) as u32),
         3..=6 => (2, (node - 3) as u32),
         7..=14 => (3, (node - 7) as u32),
-        _ => (4, (node - 14) as u32),
+        15..=30 => (4, (node - 15) as u32),
+        _ => (5, (node - 30) as u32),
     }
 }
 
-impl Cfr5Max {
+impl Cfr6Max {
     pub fn init(input: &SolverInput, cache: &EquityCache) -> Option<Self> {
         let solve_started = Instant::now();
         let model = Model::build(input, cache)?;
@@ -247,7 +333,7 @@ impl Cfr5Max {
     }
 }
 
-impl SolverAlgorithm for Cfr5Max {
+impl SolverAlgorithm for Cfr6Max {
     fn iterate(&mut self) {
         let iter_started = Instant::now();
         self.recompute_strategies();
@@ -325,47 +411,52 @@ impl SolverAlgorithm for Cfr5Max {
                 den += w;
             }
             let real = self.model.map[canon];
-            equities[real] = if den > 0.0 { num / den } else { 0.2 };
+            equities[real] = if den > 0.0 { num / den } else { 1.0 / 6.0 };
         }
 
         let mut push_ranges = vec![[0.0; HAND_TYPES]; PLAYERS];
         let mut call_ranges = vec![[0.0; HAND_TYPES]; PLAYERS];
         let mut hand_evs = vec![[0.0; HAND_TYPES]; PLAYERS];
         let seats = self.model.map;
-        push_ranges[seats[0]] = freq[five_node(0, 0)];
-        push_ranges[seats[1]] = freq[five_node(1, 0)];
-        push_ranges[seats[2]] = freq[five_node(2, 0)];
-        push_ranges[seats[3]] = freq[five_node(3, 0)];
-        call_ranges[seats[1]] = freq[five_node(1, 1)];
-        call_ranges[seats[2]] = freq[five_node(2, 1)];
-        call_ranges[seats[3]] = freq[five_node(3, 1)];
-        call_ranges[seats[4]] = freq[five_node(4, 8)];
+        push_ranges[seats[0]] = freq[six_node(0, 0)];
+        push_ranges[seats[1]] = freq[six_node(1, 0)];
+        push_ranges[seats[2]] = freq[six_node(2, 0)];
+        push_ranges[seats[3]] = freq[six_node(3, 0)];
+        push_ranges[seats[4]] = freq[six_node(4, 0)];
+        call_ranges[seats[1]] = freq[six_node(1, 1)];
+        call_ranges[seats[2]] = freq[six_node(2, 1)];
+        call_ranges[seats[3]] = freq[six_node(3, 1)];
+        call_ranges[seats[4]] = freq[six_node(4, 1)];
+        call_ranges[seats[5]] = freq[six_node(5, 16)];
         for hand in 0..HAND_TYPES {
-            hand_evs[seats[0]][hand] = diff(evs[five_node(0, 0)][hand]);
-            hand_evs[seats[1]][hand] = diff(evs[five_node(1, 0)][hand]);
-            hand_evs[seats[2]][hand] = diff(evs[five_node(2, 0)][hand]);
-            hand_evs[seats[3]][hand] = diff(evs[five_node(3, 0)][hand]);
-            hand_evs[seats[4]][hand] = diff(evs[five_node(4, 8)][hand]);
+            hand_evs[seats[0]][hand] = diff(evs[six_node(0, 0)][hand]);
+            hand_evs[seats[1]][hand] = diff(evs[six_node(1, 0)][hand]);
+            hand_evs[seats[2]][hand] = diff(evs[six_node(2, 0)][hand]);
+            hand_evs[seats[3]][hand] = diff(evs[six_node(3, 0)][hand]);
+            hand_evs[seats[4]][hand] = diff(evs[six_node(4, 0)][hand]);
+            hand_evs[seats[5]][hand] = diff(evs[six_node(5, 16)][hand]);
         }
 
         let last = self.frequencies();
         let elapsed = self.solve_started.elapsed().as_secs_f64();
         eprintln!(
-            "5-max CFR: iterations={} converged={} time={elapsed:.2}s",
+            "6-max CFR: iterations={} converged={} time={elapsed:.2}s",
             self.iterations_done, self.has_converged
         );
         eprintln!(
-            "5-max ranges last/avg: HJ {:.1}/{:.1} CO {:.1}/{:.1} BTN {:.1}/{:.1} SB {:.1}/{:.1} BBvsSB {:.1}/{:.1}",
-            combo_share(&last[five_node(0, 0)]) * 100.0,
-            combo_share(&freq[five_node(0, 0)]) * 100.0,
-            combo_share(&last[five_node(1, 0)]) * 100.0,
-            combo_share(&freq[five_node(1, 0)]) * 100.0,
-            combo_share(&last[five_node(2, 0)]) * 100.0,
-            combo_share(&freq[five_node(2, 0)]) * 100.0,
-            combo_share(&last[five_node(3, 0)]) * 100.0,
-            combo_share(&freq[five_node(3, 0)]) * 100.0,
-            combo_share(&last[five_node(4, 8)]) * 100.0,
-            combo_share(&freq[five_node(4, 8)]) * 100.0,
+            "6-max ranges last/avg: UTG {:.1}/{:.1} HJ {:.1}/{:.1} CO {:.1}/{:.1} BTN {:.1}/{:.1} SB {:.1}/{:.1} BBvsSB {:.1}/{:.1}",
+            combo_share(&last[six_node(0, 0)]) * 100.0,
+            combo_share(&freq[six_node(0, 0)]) * 100.0,
+            combo_share(&last[six_node(1, 0)]) * 100.0,
+            combo_share(&freq[six_node(1, 0)]) * 100.0,
+            combo_share(&last[six_node(2, 0)]) * 100.0,
+            combo_share(&freq[six_node(2, 0)]) * 100.0,
+            combo_share(&last[six_node(3, 0)]) * 100.0,
+            combo_share(&freq[six_node(3, 0)]) * 100.0,
+            combo_share(&last[six_node(4, 0)]) * 100.0,
+            combo_share(&freq[six_node(4, 0)]) * 100.0,
+            combo_share(&last[six_node(5, 16)]) * 100.0,
+            combo_share(&freq[six_node(5, 16)]) * 100.0,
         );
 
         let mut packed = [[0.0; HAND_TYPES]; NODES];
@@ -383,8 +474,8 @@ impl SolverAlgorithm for Cfr5Max {
             hand_evs,
             three_max_hand_evs: None,
             four_max: None,
-            five_max: Some(FiveMaxRanges { freq: packed }),
-            six_max: None,
+            five_max: None,
+            six_max: Some(SixMaxRanges { freq: packed }),
         }
     }
 }
@@ -468,7 +559,7 @@ fn reach_of(node: usize, hand: usize, opp: &[[f64; HAND_TYPES]]) -> f64 {
     for a in 0..actor {
         let prior = mask & ((1 << a) - 1);
         let bit = (mask >> a) & 1;
-        let q = opp[five_node(a, prior)][hand];
+        let q = opp[six_node(a, prior)][hand];
         p *= if bit == 1 { q } else { 1.0 - q };
     }
     p
@@ -497,10 +588,10 @@ fn cont(
     if next >= PLAYERS {
         return t.by_mask[mask as usize][hero][h];
     }
-    if next == 4 && mask == 0 {
+    if next == 5 && mask == 0 {
         return t.by_mask[0][hero][h];
     }
-    let p = opp[five_node(next, mask)][h];
+    let p = opp[six_node(next, mask)][h];
     let aggressive = cont(next + 1, mask | (1 << next), hero, h, opp, t);
     let passive = cont(next + 1, mask, hero, h, opp, t);
     p * aggressive + (1.0 - p) * passive
@@ -520,7 +611,7 @@ fn game_ev(
         p * a + (1.0 - p) * f
     };
     match seat {
-        0..=3 => {
+        0..=4 => {
             let mut ev = 0.0;
             let max_mask = 1u32 << seat;
             for mask in 0..max_mask {
@@ -528,27 +619,27 @@ fn game_ev(
                 for a in 0..seat {
                     let prior = mask & ((1 << a) - 1);
                     let bit = (mask >> a) & 1;
-                    let q = opp[five_node(a, prior)][h];
+                    let q = opp[six_node(a, prior)][h];
                     p *= if bit == 1 { q } else { 1.0 - q };
                 }
-                ev += p * mix(five_node(seat, mask));
+                ev += p * mix(six_node(seat, mask));
             }
             ev
         }
         _ => {
             let mut ev = 0.0;
-            for mask in 0..16u32 {
+            for mask in 0..32u32 {
                 let mut p = 1.0;
-                for a in 0..4 {
+                for a in 0..5 {
                     let prior = mask & ((1 << a) - 1);
                     let bit = (mask >> a) & 1;
-                    let q = opp[five_node(a, prior)][h];
+                    let q = opp[six_node(a, prior)][h];
                     p *= if bit == 1 { q } else { 1.0 - q };
                 }
                 if mask == 0 {
-                    ev += p * model.walk[0][4];
+                    ev += p * model.walk[0][5];
                 } else {
-                    ev += p * mix(five_node(4, mask));
+                    ev += p * mix(six_node(5, mask));
                 }
             }
             ev
@@ -562,12 +653,12 @@ fn range_of<'a>(
     freq: &'a [[f64; HAND_TYPES]],
 ) -> &'a [f64; HAND_TYPES] {
     let prior = final_mask & ((1 << player) - 1);
-    &freq[five_node(player, prior)]
+    &freq[six_node(player, prior)]
 }
 
 impl Model {
     fn build(input: &SolverInput, _cache: &EquityCache) -> Option<Self> {
-        if input.stacks.len() != 5 || input.button_index >= 5 {
+        if input.stacks.len() != 6 || input.button_index >= 6 {
             return None;
         }
         if input.small_blind < 0.0 || input.big_blind < 0.0 || input.ante < 0.0 {
@@ -578,12 +669,14 @@ impl Model {
         }
 
         let btn = input.button_index;
-        let sb = (btn + 1) % 5;
-        let bb = (btn + 2) % 5;
-        let hj = (btn + 3) % 5;
-        let co = (btn + 4) % 5;
-        let map = [hj, co, btn, sb, bb];
+        let sb = (btn + 1) % 6;
+        let bb = (btn + 2) % 6;
+        let utg = (btn + 3) % 6;
+        let hj = (btn + 4) % 6;
+        let co = (btn + 5) % 6;
+        let map = [utg, hj, co, btn, sb, bb];
         let base = [
+            input.stacks[utg],
             input.stacks[hj],
             input.stacks[co],
             input.stacks[btn],
@@ -594,24 +687,26 @@ impl Model {
             input.ante.min(base[0]).max(0.0),
             input.ante.min(base[1]).max(0.0),
             input.ante.min(base[2]).max(0.0),
-            (input.small_blind + input.ante).min(base[3]).max(0.0),
-            (input.big_blind + input.ante).min(base[4]).max(0.0),
+            input.ante.min(base[3]).max(0.0),
+            (input.small_blind + input.ante).min(base[4]).max(0.0),
+            (input.big_blind + input.ante).min(base[5]).max(0.0),
         ];
         let payouts = &input.payouts;
 
-        let mut walk = [[0.0; PLAYERS]; 32];
-        walk[0] = icm5(&award(base, 4, &[0, 1, 2, 3], dead), payouts);
+        let mut walk = [[0.0; PLAYERS]; 64];
+        walk[0] = icm6(&award(base, 5, &[0, 1, 2, 3, 4], dead), payouts);
         let mut hus = Vec::new();
         let mut threes = Vec::new();
         let mut fours = Vec::new();
-        let mut five_icm = [[0.0; PLAYERS]; 120];
+        let mut fives = Vec::new();
+        let mut six_icm = vec![[0.0; PLAYERS]; 720];
 
-        for mask in 1u32..32 {
+        for mask in 1u32..64 {
             let seats: Vec<usize> = (0..PLAYERS).filter(|&i| mask & (1 << i) != 0).collect();
             let folders: Vec<usize> = (0..PLAYERS).filter(|&i| mask & (1 << i) == 0).collect();
             match seats.len() {
                 1 => {
-                    walk[mask as usize] = icm5(&award(base, seats[0], &folders, dead), payouts);
+                    walk[mask as usize] = icm6(&award(base, seats[0], &folders, dead), payouts);
                 }
                 2 => {
                     let a = seats[0];
@@ -620,16 +715,15 @@ impl Model {
                         mask,
                         a,
                         b,
-                        icm_a: icm5(&hu_end(base, a, b, &folders, dead, true), payouts),
-                        icm_b: icm5(&hu_end(base, a, b, &folders, dead, false), payouts),
+                        icm_a: icm6(&hu_end(base, a, b, &folders, dead, true), payouts),
+                        icm_b: icm6(&hu_end(base, a, b, &folders, dead, false), payouts),
                     });
                 }
                 3 => {
                     let s = [seats[0], seats[1], seats[2]];
-                    let f = [folders[0], folders[1]];
                     let mut icm = [[0.0; PLAYERS]; 6];
                     for perm in 0..6 {
-                        icm[perm] = icm5(&three_end(base, dead, s, f, perm), payouts);
+                        icm[perm] = icm6(&three_end(base, dead, s, &folders, perm), payouts);
                     }
                     threes.push(ThreeTerm {
                         mask,
@@ -639,10 +733,9 @@ impl Model {
                 }
                 4 => {
                     let s = [seats[0], seats[1], seats[2], seats[3]];
-                    let folder = folders[0];
                     let mut icm = [[0.0; PLAYERS]; 24];
                     for perm in 0..24 {
-                        icm[perm] = icm5(&four_end(base, dead, s, folder, perm), payouts);
+                        icm[perm] = icm6(&four_end(base, dead, s, &folders, perm), payouts);
                     }
                     fours.push(FourTerm {
                         mask,
@@ -651,10 +744,24 @@ impl Model {
                     });
                 }
                 5 => {
-                    let (contested, uncalled) = effective5(base);
+                    let s = [seats[0], seats[1], seats[2], seats[3], seats[4]];
+                    let folder = folders[0];
+                    let mut icm = vec![[0.0; PLAYERS]; 120];
                     for perm in 0..120 {
-                        five_icm[perm] =
-                            icm5(&apply_permutation_5way(perm, contested, uncalled), payouts);
+                        icm[perm] = icm6(&five_end(base, dead, s, folder, perm), payouts);
+                    }
+                    fives.push(FiveTerm {
+                        mask,
+                        seats: s,
+                        folder,
+                        icm,
+                    });
+                }
+                6 => {
+                    let (contested, uncalled) = effective6(base);
+                    for perm in 0..720 {
+                        six_icm[perm] =
+                            icm6(&apply_permutation_6way(perm, contested, uncalled), payouts);
                     }
                 }
                 _ => {}
@@ -671,15 +778,16 @@ impl Model {
             hus,
             threes,
             fours,
-            five_icm,
+            fives,
+            six_icm,
             four_cache,
             bucket_eq,
         })
     }
 
     fn terminals(&self, freq: &[[f64; HAND_TYPES]]) -> Terminals {
-        let mut by_mask = vec![[[0.0; HAND_TYPES]; PLAYERS]; 32];
-        for mask in 0u32..32 {
+        let mut by_mask = vec![[[0.0; HAND_TYPES]; PLAYERS]; 64];
+        for mask in 0u32..64 {
             if mask == 0 || mask.count_ones() == 1 {
                 for seat in 0..PLAYERS {
                     by_mask[mask as usize][seat] = [self.walk[mask as usize][seat]; HAND_TYPES];
@@ -731,26 +839,48 @@ impl Model {
                 ranges,
                 term.seats,
                 &term.icm,
-                (0..PLAYERS).find(|&i| term.mask & (1 << i) == 0).unwrap_or(0),
+                (0..PLAYERS)
+                    .filter(|&i| term.mask & (1 << i) == 0)
+                    .collect::<Vec<_>>(),
                 &self.four_cache,
                 shared,
                 &mut by_mask[term.mask as usize],
             );
         }
 
-        let five_ranges = [
-            range_of(0, 31, freq),
-            range_of(1, 31, freq),
-            range_of(2, 31, freq),
-            range_of(3, 31, freq),
-            range_of(4, 31, freq),
+        for term in &self.fives {
+            let ranges = [
+                range_of(term.seats[0], term.mask, freq),
+                range_of(term.seats[1], term.mask, freq),
+                range_of(term.seats[2], term.mask, freq),
+                range_of(term.seats[3], term.mask, freq),
+                range_of(term.seats[4], term.mask, freq),
+            ];
+            fill_five(
+                ranges,
+                term.seats,
+                &term.icm,
+                term.folder,
+                &self.bucket_eq,
+                shared,
+                &mut by_mask[term.mask as usize],
+            );
+        }
+
+        let six_ranges = [
+            range_of(0, 63, freq),
+            range_of(1, 63, freq),
+            range_of(2, 63, freq),
+            range_of(3, 63, freq),
+            range_of(4, 63, freq),
+            range_of(5, 63, freq),
         ];
-        fill_five(
-            five_ranges,
-            &self.five_icm,
+        fill_six(
+            six_ranges,
+            &self.six_icm,
             &self.bucket_eq,
             shared,
-            &mut by_mask[31],
+            &mut by_mask[63],
         );
 
         Terminals { by_mask }
@@ -969,7 +1099,7 @@ fn fill_four(
     ranges: [&[f64; HAND_TYPES]; 4],
     seats: [usize; 4],
     icm: &[[f64; PLAYERS]; 24],
-    folder: usize,
+    folders: Vec<usize>,
     cache: &FourWayRankCache,
     shared: &Shared,
     out: &mut [[f64; HAND_TYPES]; PLAYERS],
@@ -985,7 +1115,7 @@ fn fill_four(
 
     let mut num = [[0.0; BUCKETS]; 4];
     let mut den = [[0.0; BUCKETS]; 4];
-    let mut folder_num = 0.0;
+    let mut folder_num = [0.0; PLAYERS];
     let mut folder_den = 0.0;
 
     let hero_buckets: [Vec<usize>; 4] =
@@ -1055,7 +1185,9 @@ fn fill_four(
                             continue;
                         }
                         let dist = cache.lookup(b0 as u8, b1 as u8, b2 as u8, b3 as u8);
-                        folder_num += w * dot24(&dist, icm, folder);
+                        for &folder in &folders {
+                            folder_num[folder] += w * dot24(&dist, icm, folder);
+                        }
                         folder_den += w;
                     }
                 }
@@ -1076,17 +1208,21 @@ fn fill_four(
             out[seat][h] = by_bucket[shared.bucket[h] as usize];
         }
     }
-    let folder_ev = if folder_den > 0.0 {
-        folder_num / folder_den
-    } else {
-        fallback[folder]
-    };
-    out[folder] = [folder_ev; HAND_TYPES];
+    for folder in folders {
+        let folder_ev = if folder_den > 0.0 {
+            folder_num[folder] / folder_den
+        } else {
+            fallback[folder]
+        };
+        out[folder] = [folder_ev; HAND_TYPES];
+    }
 }
 
 fn fill_five(
     ranges: [&[f64; HAND_TYPES]; 5],
-    icm: &[[f64; PLAYERS]; 120],
+    seats: [usize; 5],
+    icm: &[[f64; PLAYERS]],
+    folder: usize,
     bucket_eq: &[[f64; BUCKETS]; BUCKETS],
     shared: &Shared,
     out: &mut [[f64; HAND_TYPES]; PLAYERS],
@@ -1098,13 +1234,15 @@ fn fill_five(
                 shared.combos[h] * ranges[seat][h].clamp(0.0, 1.0);
         }
     }
-    let live: [Vec<usize>; 5] = std::array::from_fn(|seat| live_buckets(&mass[seat], 8));
+    let live: [Vec<usize>; 5] = std::array::from_fn(|seat| live_buckets(&mass[seat], 6));
     let hero_buckets: Vec<usize> = (0..BUCKETS)
         .filter(|&b| shared.bucket_mask[b] != 0)
         .collect();
 
     let mut num = [[0.0; BUCKETS]; 5];
     let mut den = [[0.0; BUCKETS]; 5];
+    let mut folder_num = 0.0;
+    let mut folder_den = 0.0;
     let orders = perm5();
 
     for hero in 0..5 {
@@ -1132,15 +1270,96 @@ fn fill_five(
                     return;
                 }
                 let strength = five_strength(buckets, bucket_eq);
-                let pay = harville_pay(strength, orders, icm, hero);
+                let pay = harville_pay(strength, orders, icm, seats[hero]);
+                num[hero][hb] += w * pay;
+                den[hero][hb] += w;
+                if hero == 0 {
+                    folder_num += w * harville_pay(strength, orders, icm, folder);
+                    folder_den += w;
+                }
+            });
+        }
+    }
+
+    let fallback = mean_icm(icm);
+    for slot in 0..5 {
+        let seat = seats[slot];
+        let mut by_bucket = [fallback[seat]; BUCKETS];
+        for b in 0..BUCKETS {
+            if den[slot][b] > 0.0 {
+                by_bucket[b] = num[slot][b] / den[slot][b];
+            }
+        }
+        for h in 0..HAND_TYPES {
+            out[seat][h] = by_bucket[shared.bucket[h] as usize];
+        }
+    }
+    let folder_ev = if folder_den > 0.0 {
+        folder_num / folder_den
+    } else {
+        fallback[folder]
+    };
+    out[folder] = [folder_ev; HAND_TYPES];
+}
+
+fn fill_six(
+    ranges: [&[f64; HAND_TYPES]; 6],
+    icm: &[[f64; PLAYERS]],
+    bucket_eq: &[[f64; BUCKETS]; BUCKETS],
+    shared: &Shared,
+    out: &mut [[f64; HAND_TYPES]; PLAYERS],
+) {
+    let mut mass = [[0.0; BUCKETS]; 6];
+    for seat in 0..6 {
+        for h in 0..HAND_TYPES {
+            mass[seat][shared.bucket[h] as usize] +=
+                shared.combos[h] * ranges[seat][h].clamp(0.0, 1.0);
+        }
+    }
+    let live: [Vec<usize>; 6] = std::array::from_fn(|seat| live_buckets(&mass[seat], 4));
+    let hero_buckets: Vec<usize> = (0..BUCKETS)
+        .filter(|&b| shared.bucket_mask[b] != 0)
+        .collect();
+
+    let mut num = [[0.0; BUCKETS]; 6];
+    let mut den = [[0.0; BUCKETS]; 6];
+    let orders = perm6();
+
+    for hero in 0..6 {
+        let others: Vec<usize> = (0..6).filter(|&s| s != hero).collect();
+        for &hb in &hero_buckets {
+            nested_five(&live, &others, |ob| {
+                let mut buckets = [0usize; 6];
+                buckets[hero] = hb;
+                for i in 0..5 {
+                    buckets[others[i]] = ob[i];
+                    if buckets_conflict(hb, ob[i], shared) {
+                        return;
+                    }
+                    for j in 0..i {
+                        if buckets_conflict(ob[j], ob[i], shared) {
+                            return;
+                        }
+                    }
+                }
+                let w = mass[others[0]][ob[0]]
+                    * mass[others[1]][ob[1]]
+                    * mass[others[2]][ob[2]]
+                    * mass[others[3]][ob[3]]
+                    * mass[others[4]][ob[4]];
+                if w <= 0.0 {
+                    return;
+                }
+                let strength = six_strength(buckets, bucket_eq);
+                let pay = harville_pay6(strength, orders, icm, hero);
                 num[hero][hb] += w * pay;
                 den[hero][hb] += w;
             });
         }
     }
 
-    let fallback = mean120(icm);
-    for seat in 0..5 {
+    let fallback = mean_icm(icm);
+    for seat in 0..6 {
         let mut by_bucket = [fallback[seat]; BUCKETS];
         for b in 0..BUCKETS {
             if den[seat][b] > 0.0 {
@@ -1168,6 +1387,23 @@ fn nested_four(live: &[Vec<usize>; 5], others: &[usize], mut f: impl FnMut([usiz
     }
 }
 
+fn nested_five(live: &[Vec<usize>; 6], others: &[usize], mut f: impl FnMut([usize; 5])) {
+    if others.iter().any(|&s| live[s].is_empty()) {
+        return;
+    }
+    for &b0 in &live[others[0]] {
+        for &b1 in &live[others[1]] {
+            for &b2 in &live[others[2]] {
+                for &b3 in &live[others[3]] {
+                    for &b4 in &live[others[4]] {
+                        f([b0, b1, b2, b3, b4]);
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn five_strength(buckets: [usize; 5], beq: &[[f64; BUCKETS]; BUCKETS]) -> [f64; 5] {
     let mut s = [0.0; 5];
     for i in 0..5 {
@@ -1182,23 +1418,50 @@ fn five_strength(buckets: [usize; 5], beq: &[[f64; BUCKETS]; BUCKETS]) -> [f64; 
     s
 }
 
+fn six_strength(buckets: [usize; 6], beq: &[[f64; BUCKETS]; BUCKETS]) -> [f64; 6] {
+    let mut s = [0.0; 6];
+    for i in 0..6 {
+        let mut prod = 1.0;
+        for j in 0..6 {
+            if i != j {
+                prod *= beq[buckets[i]][buckets[j]].max(0.02);
+            }
+        }
+        s[i] = prod.powf(0.2);
+    }
+    s
+}
+
 fn harville_pay(
     strength: [f64; 5],
     orders: &[[usize; 5]; 120],
-    icm: &[[f64; PLAYERS]; 120],
+    icm: &[[f64; PLAYERS]],
     seat: usize,
 ) -> f64 {
     let mut pay = 0.0;
     for (perm, order) in orders.iter().enumerate() {
-        pay += harville(strength, *order) * icm[perm][seat];
+        pay += harville(&strength, order) * icm[perm][seat];
     }
     pay
 }
 
-fn harville(strength: [f64; 5], order: [usize; 5]) -> f64 {
+fn harville_pay6(
+    strength: [f64; 6],
+    orders: &[[usize; 6]; 720],
+    icm: &[[f64; PLAYERS]],
+    seat: usize,
+) -> f64 {
+    let mut pay = 0.0;
+    for (perm, order) in orders.iter().enumerate() {
+        pay += harville(&strength, order) * icm[perm][seat];
+    }
+    pay
+}
+
+fn harville(strength: &[f64], order: &[usize]) -> f64 {
     let mut remaining: f64 = strength.iter().sum();
     let mut p = 1.0;
-    for &player in &order {
+    for &player in order {
         if remaining <= 1e-15 {
             return 0.0;
         }
@@ -1250,15 +1513,19 @@ fn mean24(icm: &[[f64; PLAYERS]; 24]) -> [f64; PLAYERS] {
     out
 }
 
-fn mean120(icm: &[[f64; PLAYERS]; 120]) -> [f64; PLAYERS] {
+fn mean_icm(icm: &[[f64; PLAYERS]]) -> [f64; PLAYERS] {
     let mut out = [0.0; PLAYERS];
-    for perm in 0..120 {
+    if icm.is_empty() {
+        return out;
+    }
+    for row in icm {
         for seat in 0..PLAYERS {
-            out[seat] += icm[perm][seat];
+            out[seat] += row[seat];
         }
     }
+    let n = icm.len() as f64;
     for seat in out.iter_mut() {
-        *seat /= 120.0;
+        *seat /= n;
     }
     out
 }
@@ -1269,12 +1536,12 @@ fn buckets_conflict(a: usize, b: usize, shared: &Shared) -> bool {
     left == 0 || right == 0 || left & right != 0
 }
 
-fn icm5(stacks: &[f64; 5], payouts: &[f64]) -> [f64; 5] {
+fn icm6(stacks: &[f64; 6], payouts: &[f64]) -> [f64; 6] {
     let eq = tournament_equity(stacks, payouts);
-    [eq[0], eq[1], eq[2], eq[3], eq[4]]
+    [eq[0], eq[1], eq[2], eq[3], eq[4], eq[5]]
 }
 
-fn award(base: [f64; 5], winner: usize, folders: &[usize], dead: [f64; 5]) -> [f64; 5] {
+fn award(base: [f64; 6], winner: usize, folders: &[usize], dead: [f64; 6]) -> [f64; 6] {
     let mut stacks = base;
     for &folder in folders {
         let take = dead[folder].min(stacks[folder]).max(0.0);
@@ -1285,13 +1552,13 @@ fn award(base: [f64; 5], winner: usize, folders: &[usize], dead: [f64; 5]) -> [f
 }
 
 fn hu_end(
-    base: [f64; 5],
+    base: [f64; 6],
     a: usize,
     b: usize,
     folders: &[usize],
-    dead: [f64; 5],
+    dead: [f64; 6],
     a_wins: bool,
-) -> [f64; 5] {
+) -> [f64; 6] {
     let mut stacks = base;
     let mut pot = 0.0;
     for &folder in folders {
@@ -1308,21 +1575,21 @@ fn hu_end(
 }
 
 fn three_end(
-    base: [f64; 5],
-    dead: [f64; 5],
+    base: [f64; 6],
+    dead: [f64; 6],
     seats: [usize; 3],
-    folders: [usize; 2],
+    folders: &[usize],
     perm: usize,
-) -> [f64; 5] {
+) -> [f64; 6] {
     let active = [base[seats[0]], base[seats[1]], base[seats[2]]];
     let (contested, uncalled) = effective3(active);
     let won = apply_permutation(perm, contested, uncalled);
-    let mut stacks = [0.0; 5];
+    let mut stacks = [0.0; 6];
     for slot in 0..3 {
         stacks[seats[slot]] = won[slot];
     }
     let best = PERM3[perm][0];
-    for folder in folders {
+    for &folder in folders {
         let take = dead[folder].min(base[folder]).max(0.0);
         stacks[folder] = base[folder] - take;
         stacks[seats[best]] += take;
@@ -1331,12 +1598,12 @@ fn three_end(
 }
 
 fn four_end(
-    base: [f64; 5],
-    dead: [f64; 5],
+    base: [f64; 6],
+    dead: [f64; 6],
     seats: [usize; 4],
-    folder: usize,
+    folders: &[usize],
     perm: usize,
-) -> [f64; 5] {
+) -> [f64; 6] {
     let active = [
         base[seats[0]],
         base[seats[1]],
@@ -1345,13 +1612,42 @@ fn four_end(
     ];
     let (contested, uncalled) = effective4(active);
     let won = apply_permutation_4way(perm, contested, uncalled);
-    let mut stacks = [0.0; 5];
+    let mut stacks = [0.0; 6];
     for slot in 0..4 {
+        stacks[seats[slot]] = won[slot];
+    }
+    let best = seats[PERM4[perm][0]];
+    for &folder in folders {
+        let take = dead[folder].min(base[folder]).max(0.0);
+        stacks[folder] = base[folder] - take;
+        stacks[best] += take;
+    }
+    stacks
+}
+
+fn five_end(
+    base: [f64; 6],
+    dead: [f64; 6],
+    seats: [usize; 5],
+    folder: usize,
+    perm: usize,
+) -> [f64; 6] {
+    let active = [
+        base[seats[0]],
+        base[seats[1]],
+        base[seats[2]],
+        base[seats[3]],
+        base[seats[4]],
+    ];
+    let (contested, uncalled) = effective5(active);
+    let won = apply_permutation_5way(perm, contested, uncalled);
+    let mut stacks = [0.0; 6];
+    for slot in 0..5 {
         stacks[seats[slot]] = won[slot];
     }
     let take = dead[folder].min(base[folder]).max(0.0);
     stacks[folder] = base[folder] - take;
-    stacks[seats[PERM4[perm][0]]] += take;
+    stacks[seats[perm5()[perm][0]]] += take;
     stacks
 }
 
@@ -1406,6 +1702,22 @@ fn effective5(stacks: [f64; 5]) -> ([f64; 5], [f64; 5]) {
     (contested, uncalled)
 }
 
+fn effective6(stacks: [f64; 6]) -> ([f64; 6], [f64; 6]) {
+    let mut contested = [0.0; 6];
+    let mut uncalled = [0.0; 6];
+    for i in 0..6 {
+        let mut max_other = 0.0_f64;
+        for j in 0..6 {
+            if i != j {
+                max_other = max_other.max(stacks[j]);
+            }
+        }
+        contested[i] = stacks[i].min(max_other).max(0.0);
+        uncalled[i] = (stacks[i] - contested[i]).max(0.0);
+    }
+    (contested, uncalled)
+}
+
 fn bucket_vs_bucket(shared: &Shared) -> [[f64; BUCKETS]; BUCKETS] {
     let mut num = [[0.0; BUCKETS]; BUCKETS];
     let mut den = [[0.0; BUCKETS]; BUCKETS];
@@ -1438,7 +1750,7 @@ fn cards() -> Option<&'static Shared> {
         .get_or_init(|| match Shared::load() {
             Ok(shared) => Some(shared),
             Err(error) => {
-                eprintln!("5-max caches: {error}");
+                eprintln!("6-max caches: {error}");
                 None
             }
         })
@@ -1446,7 +1758,7 @@ fn cards() -> Option<&'static Shared> {
 }
 
 fn shared_cards() -> &'static Shared {
-    cards().expect("5-max card tables")
+    cards().expect("6-max card tables")
 }
 
 impl Shared {
@@ -1556,19 +1868,31 @@ mod tests {
         }
     }
 
+    fn assert_stacks6(got: [f64; 6], expected: [f64; 6]) {
+        for i in 0..6 {
+            assert!(
+                (got[i] - expected[i]).abs() < 1e-6,
+                "seat {i}: got {got:?} expected {expected:?}"
+            );
+        }
+    }
+
     #[test]
-    fn five_node_roundtrip() {
-        assert_eq!(five_node(0, 0), 0);
-        assert_eq!(five_node(1, 0), 1);
-        assert_eq!(five_node(1, 1), 2);
-        assert_eq!(five_node(2, 0), 3);
-        assert_eq!(five_node(3, 0), 7);
-        assert_eq!(five_node(4, 1), 15);
-        assert_eq!(five_node(4, 8), 22);
-        assert_eq!(five_node(4, 15), 29);
+    fn six_node_roundtrip() {
+        assert_eq!(six_node(0, 0), 0);
+        assert_eq!(six_node(1, 0), 1);
+        assert_eq!(six_node(1, 1), 2);
+        assert_eq!(six_node(2, 0), 3);
+        assert_eq!(six_node(3, 0), 7);
+        assert_eq!(six_node(4, 0), 15);
+        assert_eq!(six_node(4, 1), 16);
+        assert_eq!(six_node(4, 15), 30);
+        assert_eq!(six_node(5, 1), 31);
+        assert_eq!(six_node(5, 16), 46);
+        assert_eq!(six_node(5, 31), 61);
         for node in 0..NODES {
             let (actor, mask) = parse_node(node);
-            assert_eq!(five_node(actor, mask), node, "node {node}");
+            assert_eq!(six_node(actor, mask), node, "node {node}");
         }
     }
 
@@ -1588,40 +1912,56 @@ mod tests {
         }
     }
 
-    fn input(stacks: [f64; 5], iterations: usize, tolerance: f64) -> SolverInput {
+    #[test]
+    fn apply_permutation_6way_correct() {
+        let uncalled = [0.0; 6];
+        assert_stacks6(
+            apply_permutation_6way(0, [100.0; 6], uncalled),
+            [600.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        );
+        for perm in 0..720 {
+            let stacks = apply_permutation_6way(perm, [100.0; 6], uncalled);
+            assert!(
+                (stacks.iter().sum::<f64>() - 600.0).abs() < 1e-6,
+                "perm {perm} chips {stacks:?}"
+            );
+        }
+    }
+
+    fn input(stacks: [f64; 6], iterations: usize, tolerance: f64) -> SolverInput {
         SolverInput {
             stacks: stacks.to_vec(),
             payouts: vec![0.5, 0.3, 0.2],
             small_blind: 50.0,
             big_blind: 100.0,
             ante: 0.0,
-            button_index: 2,
+            button_index: 3,
             max_iterations: iterations,
             tolerance,
-            num_players: 5,
+            num_players: 6,
             verbose_convergence: false,
             profile: false,
-            algorithm: Algorithm::Cfr5Max,
+            algorithm: Algorithm::Cfr6Max,
             rank_cache_strict: false,
         }
     }
 
     #[test]
-    fn cfr_5max_runs() {
+    fn cfr_6max_runs() {
         let cache = EquityCache::load(&find_file("equity_cache.bin").expect("equity_cache.bin"))
             .expect("equity cache");
-        let output = solve(&input([1000.0; 5], 8, 0.05), &cache);
-        assert_eq!(output.equities.len(), 5);
-        assert!(output.five_max.is_some());
-        let ranges = output.five_max.expect("5-max ranges");
+        let output = solve(&input([1000.0; 6], 8, 0.05), &cache);
+        assert_eq!(output.equities.len(), 6);
+        assert!(output.six_max.is_some());
+        let ranges = output.six_max.expect("6-max ranges");
         let aa = combo_index([Card::new(14, 0), Card::new(14, 1)]) as usize;
         let trash = combo_index([Card::new(7, 0), Card::new(2, 1)]) as usize;
-        let hj = &ranges.freq[five_node(0, 0)];
+        let utg = &ranges.freq[six_node(0, 0)];
         assert!(
-            hj[aa] >= hj[trash],
+            utg[aa] >= utg[trash],
             "AA {:.3} should push at least as much as 72o {:.3}",
-            hj[aa],
-            hj[trash]
+            utg[aa],
+            utg[trash]
         );
         let sum: f64 = output.equities.iter().sum();
         assert!((sum - 1.0).abs() < 0.15, "equity sum {sum}");

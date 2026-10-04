@@ -90,7 +90,9 @@ impl SolverTab {
 
         if self.result.is_some() && !self.tree.is_empty() {
             let wide_tree = self.result.as_ref().is_some_and(|result| {
-                result.output.four_max.is_some() || result.output.five_max.is_some()
+                result.output.four_max.is_some()
+                    || result.output.five_max.is_some()
+                    || result.output.six_max.is_some()
             });
             let (default_width, min_width, max_width) = if wide_tree {
                 (460.0, 380.0, 640.0)
@@ -171,9 +173,9 @@ impl SolverTab {
         match parse_hand_history(&text) {
             Ok(hand) => {
                 let num_players = hand.players.len();
-                if num_players < 2 || num_players > 5 {
+                if num_players < 2 || num_players > 6 {
                     self.error = Some(format!(
-                        "поддерживаются 2–5 игроков (найдено {num_players})"
+                        "поддерживаются 2–6 игроков (найдено {num_players})"
                     ));
                     return;
                 }
@@ -211,6 +213,9 @@ impl SolverTab {
             }
             if ui.selectable_label(self.player_count == 5, "5").clicked() {
                 self.set_player_count(5);
+            }
+            if ui.selectable_label(self.player_count == 6, "6").clicked() {
+                self.set_player_count(6);
             }
         });
 
@@ -326,11 +331,16 @@ impl SolverTab {
                         Algorithm::Cfr5Max,
                         algorithm_label(Algorithm::Cfr5Max),
                     );
+                    ui.selectable_value(
+                        &mut self.algorithm,
+                        Algorithm::Cfr6Max,
+                        algorithm_label(Algorithm::Cfr6Max),
+                    );
                 });
         });
         ui.label(
             RichText::new(
-                "FP: быстро, ±2%. CFR: 30 итераций, ±1% (HU) / ±1.5% (3-max). 4-max и 5-max считают только CFR.",
+                "FP: быстро, ±2%. CFR: 30 итераций, ±1% (HU) / ±1.5% (3-max). 4-max, 5-max и 6-max считают только CFR.",
             )
                 .small()
                 .weak(),
@@ -520,8 +530,8 @@ impl SolverTab {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        if stacks.len() < 2 || stacks.len() > 5 {
-            return Err("солвер поддерживает 2, 3, 4 или 5 игроков".to_string());
+        if stacks.len() < 2 || stacks.len() > 6 {
+            return Err("солвер поддерживает 2–6 игроков".to_string());
         }
 
         let payouts = parse_prize_payouts(&self.prize_percents)?;
@@ -577,6 +587,7 @@ impl SolverTab {
             button_index: match self.player_count {
                 4 => 1,
                 5 => 2,
+                6 => 3,
                 _ => 0,
             },
             max_iterations,
@@ -657,11 +668,13 @@ fn algorithm_label(algorithm: Algorithm) -> &'static str {
         Algorithm::Cfr3Max => "CFR 3-max",
         Algorithm::Cfr4Max => "CFR 4-max",
         Algorithm::Cfr5Max => "CFR 5-max",
+        Algorithm::Cfr6Max => "CFR 6-max",
     }
 }
 
 fn resolve_algorithm(selected: Algorithm, player_count: usize) -> Algorithm {
     match (selected, player_count) {
+        (_, 6) => Algorithm::Cfr6Max,
         (_, 5) => Algorithm::Cfr5Max,
         (_, 4) => Algorithm::Cfr4Max,
         (Algorithm::FictitiousPlay, _) => Algorithm::FictitiousPlay,
@@ -669,6 +682,8 @@ fn resolve_algorithm(selected: Algorithm, player_count: usize) -> Algorithm {
         (Algorithm::Cfr3Max, 2) => Algorithm::Cfr,
         (Algorithm::Cfr5Max, 3) => Algorithm::Cfr3Max,
         (Algorithm::Cfr5Max, 2) => Algorithm::Cfr,
+        (Algorithm::Cfr6Max, 3) => Algorithm::Cfr3Max,
+        (Algorithm::Cfr6Max, 2) => Algorithm::Cfr,
         (algorithm, _) => algorithm,
     }
 }
@@ -705,6 +720,12 @@ fn position_label(players: usize, index: usize) -> &'static str {
         (5, 2) => "BTN",
         (5, 3) => "SB",
         (5, _) => "BB",
+        (6, 0) => "UTG",
+        (6, 1) => "HJ",
+        (6, 2) => "CO",
+        (6, 3) => "BTN",
+        (6, 4) => "SB",
+        (6, _) => "BB",
         (_, 0) => "BTN",
         (_, 1) => "SB",
         (_, _) => "BB",
@@ -785,6 +806,19 @@ fn outline_range_shares(output: &SolverOutput, players: usize) -> Vec<f64> {
         }
     }
 
+    if players == 6 {
+        if let Some(ranges) = output.six_max.as_ref() {
+            return vec![
+                combo_share(&ranges.freq[poker_core::six_node(0, 0)]),
+                combo_share(&ranges.freq[poker_core::six_node(1, 0)]),
+                combo_share(&ranges.freq[poker_core::six_node(2, 0)]),
+                combo_share(&ranges.freq[poker_core::six_node(3, 0)]),
+                combo_share(&ranges.freq[poker_core::six_node(4, 0)]),
+                combo_share(&ranges.freq[poker_core::six_node(5, 16)]),
+            ];
+        }
+    }
+
     vec![0.0; players]
 }
 
@@ -819,6 +853,11 @@ mod tests {
         assert_eq!(
             resolve_algorithm(Algorithm::FictitiousPlay, 5),
             Algorithm::Cfr5Max
+        );
+        assert_eq!(resolve_algorithm(Algorithm::Cfr6Max, 6), Algorithm::Cfr6Max);
+        assert_eq!(
+            resolve_algorithm(Algorithm::FictitiousPlay, 6),
+            Algorithm::Cfr6Max
         );
     }
 

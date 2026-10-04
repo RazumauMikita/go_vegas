@@ -5,7 +5,8 @@ use std::str::FromStr;
 
 use poker_core::{
     combo_index, combo_label, equity_3way_icm, index_to_ranks, Algorithm, Card, EquityCache,
-    FiveMaxRanges, FourMaxRanges, SolverInput, SolverOutput, ThreeMaxRanges, five_node,
+    FiveMaxRanges, FourMaxRanges, SixMaxRanges, SolverInput, SolverOutput, ThreeMaxRanges,
+    five_node, six_node,
 };
 
 fn main() -> ExitCode {
@@ -61,10 +62,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
     let output = poker_core::solve(&input, &cache);
     let elapsed = started.elapsed().as_secs_f64();
     print_output(&input, &output);
-    if input.stacks.len() == 4 {
-        println!("Time: {elapsed:.2}s");
-    }
-    if input.stacks.len() == 5 {
+    if input.stacks.len() == 4 || input.stacks.len() == 5 || input.stacks.len() == 6 {
         println!("Time: {elapsed:.2}s");
     }
 
@@ -204,8 +202,13 @@ fn parse_args(args: Vec<String>) -> Result<Config, String> {
     let payouts = payouts.ok_or_else(|| "missing --payouts".to_string())?;
     let blinds = blinds.ok_or_else(|| "missing --blinds".to_string())?;
 
-    if stacks.len() != 2 && stacks.len() != 3 && stacks.len() != 4 && stacks.len() != 5 {
-        return Err("solver requires 2, 3, 4, or 5 stacks".to_string());
+    if stacks.len() != 2
+        && stacks.len() != 3
+        && stacks.len() != 4
+        && stacks.len() != 5
+        && stacks.len() != 6
+    {
+        return Err("solver requires 2, 3, 4, 5, or 6 stacks".to_string());
     }
     if blinds.len() != 2 {
         return Err("--blinds requires SB,BB".to_string());
@@ -219,6 +222,13 @@ fn parse_args(args: Vec<String>) -> Result<Config, String> {
     if tolerance <= 0.0 {
         return Err("tolerance must be greater than zero".to_string());
     }
+
+    let algorithm = match stacks.len() {
+        6 => Algorithm::Cfr6Max,
+        5 => Algorithm::Cfr5Max,
+        4 => Algorithm::Cfr4Max,
+        _ => algorithm,
+    };
 
     Ok(Config {
         num_players: stacks.len(),
@@ -353,6 +363,12 @@ fn parse_number_list(input: &str, label: &str) -> Result<Vec<f64>, String> {
 }
 
 fn print_output(input: &SolverInput, output: &SolverOutput) {
+    if input.stacks.len() == 6 {
+        if let Some(ranges) = output.six_max.as_ref() {
+            print_output_6max(input, output, ranges);
+            return;
+        }
+    }
     if input.stacks.len() == 5 {
         if let Some(ranges) = output.five_max.as_ref() {
             print_output_5max(input, output, ranges);
@@ -455,6 +471,64 @@ fn print_output_5max(input: &SolverInput, output: &SolverOutput, ranges: &FiveMa
     print_range_share("BB call vs BTN", &ranges.freq[five_node(4, 4)]);
     print_range_share("SB push (folds)", &ranges.freq[five_node(3, 0)]);
     print_range_share("BB call vs SB", &ranges.freq[five_node(4, 8)]);
+}
+
+fn print_output_6max(input: &SolverInput, output: &SolverOutput, ranges: &SixMaxRanges) {
+    let btn = input.button_index;
+    let sb = (btn + 1) % 6;
+    let bb = (btn + 2) % 6;
+    let utg = (btn + 3) % 6;
+    let hj = (btn + 4) % 6;
+    let co = (btn + 5) % 6;
+
+    println!("Players: 6");
+    println!(
+        "Stacks:  UTG={} HJ={} CO={} BTN={} SB={} BB={}",
+        input.stacks[utg],
+        input.stacks[hj],
+        input.stacks[co],
+        input.stacks[btn],
+        input.stacks[sb],
+        input.stacks[bb]
+    );
+    println!(
+        "Blinds:  {}/{} ante={}",
+        input.small_blind, input.big_blind, input.ante
+    );
+    println!(
+        "Iterations: {}  converged={}  algorithm={}",
+        output.iterations_used,
+        output.converged,
+        input.algorithm.as_str()
+    );
+    println!();
+    println!("UTG $EV: {:.2}%", output.equities[utg] * 100.0);
+    println!("HJ $EV:  {:.2}%", output.equities[hj] * 100.0);
+    println!("CO $EV:  {:.2}%", output.equities[co] * 100.0);
+    println!("BTN $EV: {:.2}%", output.equities[btn] * 100.0);
+    println!("SB $EV:  {:.2}%", output.equities[sb] * 100.0);
+    println!("BB $EV:  {:.2}%", output.equities[bb] * 100.0);
+    println!();
+    print_range_share("UTG push", &ranges.freq[six_node(0, 0)]);
+    print_range_share("HJ call vs UTG", &ranges.freq[six_node(1, 1)]);
+    print_range_share("CO call vs UTG", &ranges.freq[six_node(2, 1)]);
+    print_range_share("BTN call vs UTG", &ranges.freq[six_node(3, 1)]);
+    print_range_share("SB call vs UTG", &ranges.freq[six_node(4, 1)]);
+    print_range_share("BB call vs UTG", &ranges.freq[six_node(5, 1)]);
+    print_range_share("HJ push (UTG fold)", &ranges.freq[six_node(1, 0)]);
+    print_range_share("CO call vs HJ", &ranges.freq[six_node(2, 2)]);
+    print_range_share("BTN call vs HJ", &ranges.freq[six_node(3, 2)]);
+    print_range_share("SB call vs HJ", &ranges.freq[six_node(4, 2)]);
+    print_range_share("BB call vs HJ", &ranges.freq[six_node(5, 2)]);
+    print_range_share("CO push (folds)", &ranges.freq[six_node(2, 0)]);
+    print_range_share("BTN call vs CO", &ranges.freq[six_node(3, 4)]);
+    print_range_share("SB call vs CO", &ranges.freq[six_node(4, 4)]);
+    print_range_share("BB call vs CO", &ranges.freq[six_node(5, 4)]);
+    print_range_share("BTN push (folds)", &ranges.freq[six_node(3, 0)]);
+    print_range_share("SB call vs BTN", &ranges.freq[six_node(4, 8)]);
+    print_range_share("BB call vs BTN", &ranges.freq[six_node(5, 8)]);
+    print_range_share("SB push (folds)", &ranges.freq[six_node(4, 0)]);
+    print_range_share("BB call vs SB", &ranges.freq[six_node(5, 16)]);
 }
 
 fn print_output_4max(input: &SolverInput, output: &SolverOutput, ranges: &FourMaxRanges) {
@@ -633,7 +707,7 @@ Options:
   --button N
   --iterations N   (default 50)
   --tolerance X    (default 0.001)
-  --algorithm fp|cfr|cfr-3max|cfr-4max|cfr-5max  (default fp)
+  --algorithm fp|cfr|cfr-3max|cfr-4max|cfr-5max|cfr-6max  (default fp)
   --rank-cache-strict  (error on 3-way rank cache miss instead of lazy compute)
   --profile        (time 3-max EV functions for one sequential pass)
   --debug-3way     (print 3-way ICM MC convergence for AsKs/QhQd/7c7d)"

@@ -1,5 +1,8 @@
 use egui::{Color32, RichText, Ui};
-use poker_core::{FiveMaxRanges, FourMaxRanges, SolverOutput, ThreeMaxHandEvs, ThreeMaxRanges, five_node};
+use poker_core::{
+    five_node, six_node, FiveMaxRanges, FourMaxRanges, SixMaxRanges, SolverOutput,
+    ThreeMaxHandEvs, ThreeMaxRanges,
+};
 
 use crate::widgets::combo_share;
 
@@ -24,7 +27,9 @@ pub struct TreeNode {
 pub type NodePath = Vec<usize>;
 
 pub fn build_strategy_tree(output: &SolverOutput, button_index: usize) -> Vec<TreeNode> {
-    if let Some(ranges) = output.five_max.as_ref() {
+    if let Some(ranges) = output.six_max.as_ref() {
+        build_6max_tree(ranges, output, button_index)
+    } else if let Some(ranges) = output.five_max.as_ref() {
         build_5max_tree(ranges, output, button_index)
     } else if let Some(ranges) = output.four_max.as_ref() {
         build_4max_tree(ranges, output, button_index)
@@ -547,6 +552,99 @@ fn build_5max_tree(
                 Action::Call,
                 f(4, 8),
                 ev(4),
+                vec![],
+            )],
+        ),
+    ]
+}
+
+fn six_max_seat(button_index: usize, role: usize) -> usize {
+    let button = button_index % 6;
+    match role {
+        0 => (button + 3) % 6,
+        1 => (button + 4) % 6,
+        2 => (button + 5) % 6,
+        3 => button,
+        4 => (button + 1) % 6,
+        _ => (button + 2) % 6,
+    }
+}
+
+fn six_seat_ev(output: &SolverOutput, button_index: usize, role: usize) -> Option<[f64; 169]> {
+    output
+        .hand_evs
+        .get(six_max_seat(button_index, role))
+        .copied()
+}
+
+fn freq_node6(ranges: &SixMaxRanges, actor: usize, mask: u32) -> [f64; 169] {
+    ranges.freq[six_node(actor, mask)]
+}
+
+fn build_6max_tree(
+    ranges: &SixMaxRanges,
+    output: &SolverOutput,
+    button_index: usize,
+) -> Vec<TreeNode> {
+    let ev = |role: usize| six_seat_ev(output, button_index, role);
+    let f = |actor: usize, mask: u32| freq_node6(ranges, actor, mask);
+    vec![
+        make_node(
+            "UTG push",
+            Action::Raise,
+            f(0, 0),
+            ev(0),
+            vec![
+                make_node("HJ call (vs UTG)", Action::Call, f(1, 1), None, vec![]),
+                make_node("CO call (vs UTG)", Action::Call, f(2, 1), None, vec![]),
+                make_node("BTN call (vs UTG)", Action::Call, f(3, 1), None, vec![]),
+                make_node("SB call (vs UTG)", Action::Call, f(4, 1), None, vec![]),
+                make_node("BB call (vs UTG)", Action::Call, f(5, 1), None, vec![]),
+            ],
+        ),
+        make_node(
+            "HJ push (UTG fold)",
+            Action::Raise,
+            f(1, 0),
+            ev(1),
+            vec![
+                make_node("CO call (vs HJ)", Action::Call, f(2, 2), None, vec![]),
+                make_node("BTN call (vs HJ)", Action::Call, f(3, 2), None, vec![]),
+                make_node("SB call (vs HJ)", Action::Call, f(4, 2), None, vec![]),
+                make_node("BB call (vs HJ)", Action::Call, f(5, 2), None, vec![]),
+            ],
+        ),
+        make_node(
+            "CO push (folds)",
+            Action::Raise,
+            f(2, 0),
+            ev(2),
+            vec![
+                make_node("BTN call (vs CO)", Action::Call, f(3, 4), None, vec![]),
+                make_node("SB call (vs CO)", Action::Call, f(4, 4), None, vec![]),
+                make_node("BB call (vs CO)", Action::Call, f(5, 4), None, vec![]),
+            ],
+        ),
+        make_node(
+            "BTN push (folds)",
+            Action::Raise,
+            f(3, 0),
+            ev(3),
+            vec![
+                make_node("SB call (vs BTN)", Action::Call, f(4, 8), None, vec![]),
+                make_node("BB call (vs BTN)", Action::Call, f(5, 8), None, vec![]),
+            ],
+        ),
+        make_node(
+            "SB push (folds)",
+            Action::Raise,
+            f(4, 0),
+            ev(4),
+            vec![make_node(
+                "BB call (vs SB)",
+                Action::Call,
+                f(5, 16),
+                ev(5),
                 vec![],
             )],
         ),

@@ -536,6 +536,7 @@ impl SolverAlgorithm for Cfr4Max {
                 bb_call_vs_sb: freq[N_BB_FFP],
             }),
             five_max: None,
+            six_max: None,
         }
     }
 }

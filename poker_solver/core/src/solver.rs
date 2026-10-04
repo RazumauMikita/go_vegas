@@ -91,6 +91,8 @@ pub struct SolverOutput {
     pub four_max: Option<FourMaxRanges>,
     /// Диапазоны 5-max push/fold (30 info set).
     pub five_max: Option<FiveMaxRanges>,
+    /// Диапазоны 6-max push/fold (62 info set).
+    pub six_max: Option<SixMaxRanges>,
 }
 
 /// Диапазоны 4-max push/fold. Индекс 0 в каждой паре действий — push или call.
@@ -131,6 +133,26 @@ pub fn five_node(actor: usize, prior_mask: u32) -> usize {
     }
 }
 
+pub const SIX_MAX_NODES: usize = 62;
+
+/// Диапазоны 6-max push/fold. `freq[node]` — частота push/call на info set.
+#[derive(Debug, Clone)]
+pub struct SixMaxRanges {
+    pub freq: [[f64; HAND_TYPES]; SIX_MAX_NODES],
+}
+
+/// Info set 6-max: игрок `actor` (0=UTG … 5=BB) при маске уже зашедших.
+pub fn six_node(actor: usize, prior_mask: u32) -> usize {
+    match actor {
+        0 => 0,
+        1 => 1 + prior_mask as usize,
+        2 => 3 + prior_mask as usize,
+        3 => 7 + prior_mask as usize,
+        4 => 15 + prior_mask as usize,
+        _ => 30 + prior_mask as usize,
+    }
+}
+
 /// Диагностика EV колла BB (без FP, фиксированные диапазоны по combo-share).
 pub fn debug_bb_report(
     input: &SolverInput,
@@ -144,9 +166,9 @@ pub fn debug_bb_report(
 
 /// Найти равновесие Нэша для push/fold.
 ///
-/// HU, 3-max, 4-max или 5-max.
+/// HU, 3-max, 4-max, 5-max или 6-max.
 pub fn solve(input: &SolverInput, cache: &EquityCache) -> SolverOutput {
-    let players = if matches!(input.num_players, 2 | 3 | 4 | 5) {
+    let players = if matches!(input.num_players, 2 | 3 | 4 | 5 | 6) {
         input.num_players
     } else {
         input.stacks.len()
@@ -164,7 +186,7 @@ pub fn solve(input: &SolverInput, cache: &EquityCache) -> SolverOutput {
     match players {
         2 => algorithm::dispatch(input, cache),
         3 => match input.algorithm {
-            Algorithm::Cfr3Max | Algorithm::Cfr4Max | Algorithm::Cfr5Max => {
+            Algorithm::Cfr3Max | Algorithm::Cfr4Max | Algorithm::Cfr5Max | Algorithm::Cfr6Max => {
                 crate::algorithm::Cfr3Max::run(input, cache)
             }
             _ => three_max::solve_3max(input, cache),
@@ -175,6 +197,10 @@ pub fn solve(input: &SolverInput, cache: &EquityCache) -> SolverOutput {
         },
         5 => match input.algorithm {
             Algorithm::Cfr5Max => crate::algorithm::Cfr5Max::run(input, cache),
+            _ => empty_output(input.stacks.len()),
+        },
+        6 => match input.algorithm {
+            Algorithm::Cfr6Max => crate::algorithm::Cfr6Max::run(input, cache),
             _ => empty_output(input.stacks.len()),
         },
         _ => empty_output(input.stacks.len()),
@@ -218,6 +244,7 @@ pub(crate) fn build_hu_output(
         three_max_hand_evs: None,
         four_max: None,
         five_max: None,
+        six_max: None,
     }
 }
 
@@ -233,6 +260,7 @@ pub(crate) fn empty_output(players: usize) -> SolverOutput {
         three_max_hand_evs: None,
         four_max: None,
         five_max: None,
+        six_max: None,
     }
 }
 
