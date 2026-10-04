@@ -539,6 +539,7 @@ impl SolverAlgorithm for Cfr4Max {
             six_max: None,
             seven_max: None,
             eight_max: None,
+            nine_max: None,
         }
     }
 }

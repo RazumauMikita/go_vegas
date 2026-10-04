@@ -5,8 +5,9 @@ use std::str::FromStr;
 
 use poker_core::{
     combo_index, combo_label, equity_3way_icm, index_to_ranks, Algorithm, Card, EquityCache,
-    FiveMaxRanges, FourMaxRanges, SevenMaxRanges, SixMaxRanges, EightMaxRanges, SolverInput,
-    SolverOutput, ThreeMaxRanges, five_node, seven_node, six_node, eight_node,
+    FiveMaxRanges, FourMaxRanges, NineMaxRanges, SevenMaxRanges, SixMaxRanges, EightMaxRanges,
+    SolverInput, SolverOutput, ThreeMaxRanges, five_node, seven_node, six_node, eight_node,
+    nine_node,
 };
 
 fn main() -> ExitCode {
@@ -67,6 +68,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
         || input.stacks.len() == 6
         || input.stacks.len() == 7
         || input.stacks.len() == 8
+        || input.stacks.len() == 9
     {
         println!("Time: {elapsed:.2}s");
     }
@@ -214,8 +216,9 @@ fn parse_args(args: Vec<String>) -> Result<Config, String> {
         && stacks.len() != 6
         && stacks.len() != 7
         && stacks.len() != 8
+        && stacks.len() != 9
     {
-        return Err("solver requires 2, 3, 4, 5, 6, 7, or 8 stacks".to_string());
+        return Err("solver requires 2, 3, 4, 5, 6, 7, 8, or 9 stacks".to_string());
     }
     if blinds.len() != 2 {
         return Err("--blinds requires SB,BB".to_string());
@@ -231,6 +234,7 @@ fn parse_args(args: Vec<String>) -> Result<Config, String> {
     }
 
     let algorithm = match stacks.len() {
+        9 => Algorithm::Cfr9Max,
         8 => Algorithm::Cfr8Max,
         7 => Algorithm::Cfr7Max,
         6 => Algorithm::Cfr6Max,
@@ -372,6 +376,12 @@ fn parse_number_list(input: &str, label: &str) -> Result<Vec<f64>, String> {
 }
 
 fn print_output(input: &SolverInput, output: &SolverOutput) {
+    if input.stacks.len() == 9 {
+        if let Some(ranges) = output.nine_max.as_ref() {
+            print_output_9max(input, output, ranges);
+            return;
+        }
+    }
     if input.stacks.len() == 8 {
         if let Some(ranges) = output.eight_max.as_ref() {
             print_output_8max(input, output, ranges);
@@ -699,6 +709,97 @@ fn print_output_8max(input: &SolverInput, output: &SolverOutput, ranges: &EightM
     print_range_share("BB call vs SB", &ranges.freq[eight_node(7, 64)]);
 }
 
+fn print_output_9max(input: &SolverInput, output: &SolverOutput, ranges: &NineMaxRanges) {
+    let btn = input.button_index;
+    let sb = (btn + 1) % 9;
+    let bb = (btn + 2) % 9;
+    let utg = (btn + 3) % 9;
+    let ep = (btn + 4) % 9;
+    let mp1 = (btn + 5) % 9;
+    let mp2 = (btn + 6) % 9;
+    let hj = (btn + 7) % 9;
+    let co = (btn + 8) % 9;
+
+    println!("Players: 9");
+    println!(
+        "Stacks:  UTG={} EP={} MP1={} MP2={} HJ={} CO={} BTN={} SB={} BB={}",
+        input.stacks[utg],
+        input.stacks[ep],
+        input.stacks[mp1],
+        input.stacks[mp2],
+        input.stacks[hj],
+        input.stacks[co],
+        input.stacks[btn],
+        input.stacks[sb],
+        input.stacks[bb]
+    );
+    println!(
+        "Blinds:  {}/{} ante={}",
+        input.small_blind, input.big_blind, input.ante
+    );
+    println!(
+        "Iterations: {}  converged={}  algorithm={}",
+        output.iterations_used,
+        output.converged,
+        input.algorithm.as_str()
+    );
+    println!();
+    println!("UTG $EV: {:.2}%", output.equities[utg] * 100.0);
+    println!("EP $EV:  {:.2}%", output.equities[ep] * 100.0);
+    println!("MP1 $EV: {:.2}%", output.equities[mp1] * 100.0);
+    println!("MP2 $EV: {:.2}%", output.equities[mp2] * 100.0);
+    println!("HJ $EV:  {:.2}%", output.equities[hj] * 100.0);
+    println!("CO $EV:  {:.2}%", output.equities[co] * 100.0);
+    println!("BTN $EV: {:.2}%", output.equities[btn] * 100.0);
+    println!("SB $EV:  {:.2}%", output.equities[sb] * 100.0);
+    println!("BB $EV:  {:.2}%", output.equities[bb] * 100.0);
+    println!();
+    print_range_share("UTG push", &ranges.freq[nine_node(0, 0)]);
+    print_range_share("EP call vs UTG", &ranges.freq[nine_node(1, 1)]);
+    print_range_share("MP1 call vs UTG", &ranges.freq[nine_node(2, 1)]);
+    print_range_share("MP2 call vs UTG", &ranges.freq[nine_node(3, 1)]);
+    print_range_share("HJ call vs UTG", &ranges.freq[nine_node(4, 1)]);
+    print_range_share("CO call vs UTG", &ranges.freq[nine_node(5, 1)]);
+    print_range_share("BTN call vs UTG", &ranges.freq[nine_node(6, 1)]);
+    print_range_share("SB call vs UTG", &ranges.freq[nine_node(7, 1)]);
+    print_range_share("BB call vs UTG", &ranges.freq[nine_node(8, 1)]);
+    print_range_share("EP push (UTG fold)", &ranges.freq[nine_node(1, 0)]);
+    print_range_share("MP1 call vs EP", &ranges.freq[nine_node(2, 2)]);
+    print_range_share("MP2 call vs EP", &ranges.freq[nine_node(3, 2)]);
+    print_range_share("HJ call vs EP", &ranges.freq[nine_node(4, 2)]);
+    print_range_share("CO call vs EP", &ranges.freq[nine_node(5, 2)]);
+    print_range_share("BTN call vs EP", &ranges.freq[nine_node(6, 2)]);
+    print_range_share("SB call vs EP", &ranges.freq[nine_node(7, 2)]);
+    print_range_share("BB call vs EP", &ranges.freq[nine_node(8, 2)]);
+    print_range_share("MP1 push (folds)", &ranges.freq[nine_node(2, 0)]);
+    print_range_share("MP2 call vs MP1", &ranges.freq[nine_node(3, 4)]);
+    print_range_share("HJ call vs MP1", &ranges.freq[nine_node(4, 4)]);
+    print_range_share("CO call vs MP1", &ranges.freq[nine_node(5, 4)]);
+    print_range_share("BTN call vs MP1", &ranges.freq[nine_node(6, 4)]);
+    print_range_share("SB call vs MP1", &ranges.freq[nine_node(7, 4)]);
+    print_range_share("BB call vs MP1", &ranges.freq[nine_node(8, 4)]);
+    print_range_share("MP2 push (folds)", &ranges.freq[nine_node(3, 0)]);
+    print_range_share("HJ call vs MP2", &ranges.freq[nine_node(4, 8)]);
+    print_range_share("CO call vs MP2", &ranges.freq[nine_node(5, 8)]);
+    print_range_share("BTN call vs MP2", &ranges.freq[nine_node(6, 8)]);
+    print_range_share("SB call vs MP2", &ranges.freq[nine_node(7, 8)]);
+    print_range_share("BB call vs MP2", &ranges.freq[nine_node(8, 8)]);
+    print_range_share("HJ push (folds)", &ranges.freq[nine_node(4, 0)]);
+    print_range_share("CO call vs HJ", &ranges.freq[nine_node(5, 16)]);
+    print_range_share("BTN call vs HJ", &ranges.freq[nine_node(6, 16)]);
+    print_range_share("SB call vs HJ", &ranges.freq[nine_node(7, 16)]);
+    print_range_share("BB call vs HJ", &ranges.freq[nine_node(8, 16)]);
+    print_range_share("CO push (folds)", &ranges.freq[nine_node(5, 0)]);
+    print_range_share("BTN call vs CO", &ranges.freq[nine_node(6, 32)]);
+    print_range_share("SB call vs CO", &ranges.freq[nine_node(7, 32)]);
+    print_range_share("BB call vs CO", &ranges.freq[nine_node(8, 32)]);
+    print_range_share("BTN push (folds)", &ranges.freq[nine_node(6, 0)]);
+    print_range_share("SB call vs BTN", &ranges.freq[nine_node(7, 64)]);
+    print_range_share("BB call vs BTN", &ranges.freq[nine_node(8, 64)]);
+    print_range_share("SB push (folds)", &ranges.freq[nine_node(7, 0)]);
+    print_range_share("BB call vs SB", &ranges.freq[nine_node(8, 128)]);
+}
+
 fn print_output_4max(input: &SolverInput, output: &SolverOutput, ranges: &FourMaxRanges) {
     let btn = input.button_index;
     let sb = (btn + 1) % 4;
@@ -875,7 +976,7 @@ Options:
   --button N
   --iterations N   (default 50)
   --tolerance X    (default 0.001)
-  --algorithm fp|cfr|cfr-3max|cfr-4max|cfr-5max|cfr-6max|cfr-7max|cfr-8max  (default fp)
+  --algorithm fp|cfr|cfr-3max|cfr-4max|cfr-5max|cfr-6max|cfr-7max|cfr-8max|cfr-9max  (default fp)
   --rank-cache-strict  (error on 3-way rank cache miss instead of lazy compute)
   --profile        (time 3-max EV functions for one sequential pass)
   --debug-3way     (print 3-way ICM MC convergence for AsKs/QhQd/7c7d)"

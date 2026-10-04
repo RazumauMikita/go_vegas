@@ -570,6 +570,7 @@ impl SolverAlgorithm for Cfr7Max {
             six_max: None,
             seven_max: Some(SevenMaxRanges { freq }),
             eight_max: None,
+            nine_max: None,
         }
     }
 }
