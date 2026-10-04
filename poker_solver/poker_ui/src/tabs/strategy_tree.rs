@@ -1,11 +1,25 @@
-use egui::{Color32, RichText, Ui};
+use std::collections::HashMap;
+
+use egui::{Color32, FontId, Pos2, Rect, Sense, Ui};
 use poker_core::{
     eight_node, five_node, nine_node, seven_node, six_node, EightMaxRanges, FiveMaxRanges,
     FourMaxRanges, NineMaxRanges, SevenMaxRanges, SixMaxRanges, SolverOutput, ThreeMaxHandEvs,
     ThreeMaxRanges,
 };
 
-use crate::widgets::combo_share;
+use crate::widgets::{combo_share, range_notation};
+
+const COL_ACTION_W: f32 = 108.0;
+const COL_AMT_W: f32 = 64.0;
+const COL_PLAYER_W: f32 = 52.0;
+const ROW_H: f32 = 22.0;
+const TREE_HEADER: Color32 = Color32::from_rgb(70, 141, 196);
+const TREE_SELECTED: Color32 = Color32::from_rgb(196, 226, 248);
+const TREE_HOVER: Color32 = Color32::from_rgb(232, 244, 252);
+const TREE_BG: Color32 = Color32::WHITE;
+const TREE_TEXT: Color32 = Color32::from_rgb(32, 32, 32);
+const DOT_RAISE: Color32 = Color32::from_rgb(76, 175, 80);
+const DOT_CALL: Color32 = Color32::from_rgb(196, 80, 70);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
@@ -27,6 +41,19 @@ pub struct TreeNode {
 }
 
 pub type NodePath = Vec<usize>;
+
+impl TreeNode {
+    pub fn player(&self) -> &str {
+        self.label.split_whitespace().next().unwrap_or("")
+    }
+
+    pub fn action_code(&self) -> &'static str {
+        match self.action {
+            Action::Raise => "R",
+            Action::Call | Action::CallSpecial => "C",
+        }
+    }
+}
 
 pub fn build_strategy_tree(output: &SolverOutput, button_index: usize) -> Vec<TreeNode> {
     if let Some(ranges) = output.nine_max.as_ref() {
@@ -71,12 +98,49 @@ pub fn node_at_path_mut<'a>(tree: &'a mut [TreeNode], path: &[usize]) -> Option<
     Some(current)
 }
 
+pub fn draw_strategy_tree_header(ui: &mut Ui) {
+    let width = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, ROW_H), Sense::hover());
+    ui.painter().rect_filled(rect, 0.0, TREE_HEADER);
+    let font = FontId::proportional(13.0);
+    let y = rect.center().y;
+    paint_col_text(ui, rect.left() + 8.0, y, "Action", &font, Color32::WHITE, None);
+    paint_col_text(
+        ui,
+        rect.left() + COL_ACTION_W,
+        y,
+        "Amt [BB]",
+        &font,
+        Color32::WHITE,
+        None,
+    );
+    paint_col_text(
+        ui,
+        rect.left() + COL_ACTION_W + COL_AMT_W,
+        y,
+        "Player",
+        &font,
+        Color32::WHITE,
+        None,
+    );
+    paint_col_text(
+        ui,
+        rect.left() + COL_ACTION_W + COL_AMT_W + COL_PLAYER_W,
+        y,
+        "Range",
+        &font,
+        Color32::WHITE,
+        None,
+    );
+}
+
 pub fn draw_strategy_tree(
     ui: &mut Ui,
     tree: &mut [TreeNode],
     selected_path: &mut Option<NodePath>,
     editor_path: &mut Option<NodePath>,
-    locked_ids: &std::collections::HashMap<usize, [f64; 169]>,
+    locked_ids: &HashMap<usize, [f64; 169]>,
+    stacks_bb: &HashMap<String, f64>,
     path_prefix: &[usize],
     depth: usize,
 ) {
@@ -87,66 +151,109 @@ pub fn draw_strategy_tree(
             .copied()
             .collect();
         let is_selected = selected_path.as_ref() == Some(&current_path);
+        let is_locked = locked_ids.contains_key(&node.range_id);
+        let has_children = !node.children.is_empty();
+        let amount = stacks_bb.get(node.player()).copied().unwrap_or(0.0);
+        let notation = range_notation(&node.range);
+        let range_text = if notation.is_empty() {
+            format!("{:.1}%", node.range_pct)
+        } else {
+            format!("{:.1}%, {notation}", node.range_pct)
+        };
+
+        let width = ui.available_width();
+        let (rect, response) = ui.allocate_exact_size(egui::vec2(width, ROW_H), Sense::click());
+        let hovered = response.hovered();
+        let bg = if is_selected {
+            TREE_SELECTED
+        } else if hovered {
+            TREE_HOVER
+        } else {
+            TREE_BG
+        };
+        ui.painter().rect_filled(rect, 0.0, bg);
+        if is_locked {
+            ui.painter().rect_stroke(
+                rect,
+                0.0,
+                egui::Stroke::new(1.0_f32, Color32::from_rgb(255, 196, 40)),
+            );
+        }
 
         let indent = depth as f32 * 14.0;
-        ui.horizontal(|ui| {
-            ui.add_space(indent);
-
-            if node.children.is_empty() {
-                ui.add_space(18.0);
-            } else {
-                let icon = if node.expanded { "▼" } else { "▶" };
-                if ui.small_button(icon).clicked() {
-                    node.expanded = !node.expanded;
-                }
-            }
-
-            let is_locked = locked_ids.contains_key(&node.range_id);
-            let marker = if is_selected { "●" } else { "○" };
-            let action_char = match node.action {
-                Action::Raise => "R",
-                Action::Call | Action::CallSpecial => "C",
-            };
-            let row_text = format!(
-                "{marker} {action_char} {} {:.1}%",
-                node.label, node.range_pct
-            );
-
-            if is_locked {
-                ui.add(
-                    egui::Button::new(RichText::new("LOCK").small().strong().color(Color32::BLACK))
-                        .fill(Color32::from_rgb(255, 196, 40))
-                        .stroke(egui::Stroke::NONE)
-                        .sense(egui::Sense::hover()),
-                );
-            }
-
-            let action_color = action_color(node.action);
-            let bg = if is_selected && is_locked {
-                Color32::from_rgb(160, 120, 40)
-            } else if is_selected {
-                Color32::from_rgb(100, 150, 220)
-            } else if is_locked {
-                Color32::from_rgb(70, 55, 20)
-            } else {
-                ui.visuals().widgets.noninteractive.bg_fill
-            };
-            let stroke = if is_locked {
-                egui::Stroke::new(1.5_f32, Color32::from_rgb(255, 196, 40))
-            } else {
-                egui::Stroke::NONE
-            };
-
-            let response = ui.add(
-                egui::Button::new(RichText::new(row_text).color(action_color))
-                    .fill(bg)
-                    .stroke(stroke),
+        let action_left = rect.left() + 4.0 + indent;
+        let mut expand_clicked = false;
+        if has_children {
+            let icon = if node.expanded { "▼" } else { "▶" };
+            let icon_pos = Pos2::new(action_left + 8.0, rect.center().y);
+            let icon_rect = Rect::from_center_size(icon_pos, egui::vec2(16.0, ROW_H));
+            ui.painter().text(
+                icon_pos,
+                egui::Align2::CENTER_CENTER,
+                icon,
+                FontId::proportional(12.0),
+                TREE_TEXT,
             );
             if response.clicked() {
-                *selected_path = Some(current_path.clone());
-                *editor_path = Some(current_path.clone());
+                if let Some(pos) = response.interact_pointer_pos() {
+                    if icon_rect.contains(pos) {
+                        node.expanded = !node.expanded;
+                        expand_clicked = true;
+                    }
+                }
             }
-        });
+        }
+
+        let dot_x = action_left + if has_children { 22.0 } else { 18.0 };
+        let dot_color = match node.action {
+            Action::Raise => DOT_RAISE,
+            Action::Call | Action::CallSpecial => DOT_CALL,
+        };
+        ui.painter()
+            .circle_filled(Pos2::new(dot_x, rect.center().y), 4.5, dot_color);
+        ui.painter().text(
+            Pos2::new(dot_x + 12.0, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            node.action_code(),
+            FontId::proportional(13.0),
+            TREE_TEXT,
+        );
+
+        let font = FontId::proportional(12.0);
+        paint_col_text(
+            ui,
+            rect.left() + COL_ACTION_W,
+            rect.center().y,
+            &format!("{amount:.2}"),
+            &font,
+            TREE_TEXT,
+            None,
+        );
+        paint_col_text(
+            ui,
+            rect.left() + COL_ACTION_W + COL_AMT_W,
+            rect.center().y,
+            node.player(),
+            &font,
+            TREE_TEXT,
+            None,
+        );
+        paint_col_text(
+            ui,
+            rect.left() + COL_ACTION_W + COL_AMT_W + COL_PLAYER_W,
+            rect.center().y,
+            &range_text,
+            &font,
+            TREE_TEXT,
+            Some(rect.right() - 4.0),
+        );
+
+        if response.clicked() && !expand_clicked {
+            *selected_path = Some(current_path.clone());
+        }
+        if response.double_clicked() {
+            *editor_path = Some(current_path.clone());
+        }
 
         if node.expanded && !node.children.is_empty() {
             draw_strategy_tree(
@@ -155,6 +262,7 @@ pub fn draw_strategy_tree(
                 selected_path,
                 editor_path,
                 locked_ids,
+                stacks_bb,
                 &current_path,
                 depth + 1,
             );
@@ -162,11 +270,36 @@ pub fn draw_strategy_tree(
     }
 }
 
-fn action_color(action: Action) -> Color32 {
-    match action {
-        Action::Raise => Color32::from_rgb(80, 200, 80),
-        Action::Call => Color32::from_rgb(220, 80, 80),
-        Action::CallSpecial => Color32::from_rgb(100, 150, 220),
+fn paint_col_text(
+    ui: &Ui,
+    x: f32,
+    y: f32,
+    text: &str,
+    font: &FontId,
+    color: Color32,
+    clip_right: Option<f32>,
+) {
+    if let Some(right) = clip_right {
+        ui.painter()
+            .with_clip_rect(Rect::from_min_max(
+                Pos2::new(x, y - ROW_H * 0.5),
+                Pos2::new(right, y + ROW_H * 0.5),
+            ))
+            .text(
+                Pos2::new(x, y),
+                egui::Align2::LEFT_CENTER,
+                text,
+                font.clone(),
+                color,
+            );
+    } else {
+        ui.painter().text(
+            Pos2::new(x, y),
+            egui::Align2::LEFT_CENTER,
+            text,
+            font.clone(),
+            color,
+        );
     }
 }
 

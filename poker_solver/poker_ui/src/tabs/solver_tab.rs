@@ -10,7 +10,8 @@ use poker_core::{
 };
 
 use crate::tabs::strategy_tree::{
-    build_strategy_tree, draw_strategy_tree, node_at_path, node_at_path_mut, NodePath, TreeNode,
+    build_strategy_tree, draw_strategy_tree, draw_strategy_tree_header, node_at_path,
+    node_at_path_mut, Action, NodePath, TreeNode,
 };
 use crate::util::format_duration;
 use crate::widgets::{
@@ -39,6 +40,7 @@ struct RangeEditor {
     ranking: Vec<usize>,
     lock: bool,
     matrix_mode: MatrixMode,
+    is_raise: bool,
 }
 
 const CACHE_BYTES: &[u8] = include_bytes!("../../assets/equity_cache.bin");
@@ -107,26 +109,22 @@ impl SolverTab {
             });
 
         if self.result.is_some() && !self.tree.is_empty() {
-            let wide_tree = self.result.as_ref().is_some_and(|result| {
-                result.output.four_max.is_some()
-                    || result.output.five_max.is_some()
-                    || result.output.six_max.is_some()
-                    || result.output.seven_max.is_some()
-                    || result.output.eight_max.is_some()
-                    || result.output.nine_max.is_some()
-            });
-            let (default_width, min_width, max_width) = if wide_tree {
-                (460.0, 380.0, 640.0)
-            } else {
-                (300.0, 280.0, 360.0)
-            };
+            let (default_width, min_width, max_width) = (560.0, 420.0, 820.0);
             egui::SidePanel::left("strategy_tree_panel")
                 .resizable(true)
                 .default_width(default_width)
                 .width_range(min_width..=max_width)
+                .frame(
+                    egui::Frame::none()
+                        .fill(egui::Color32::WHITE)
+                        .inner_margin(egui::Margin::same(4.0)),
+                )
                 .show(ctx, |ui| {
-                    ui.heading("Strategy Tree");
-                    ui.separator();
+                    ui.visuals_mut().override_text_color =
+                        Some(egui::Color32::from_rgb(32, 32, 32));
+                    ui.visuals_mut().panel_fill = egui::Color32::WHITE;
+                    draw_strategy_tree_header(ui);
+                    let stacks_bb = self.tree_stack_bbs();
                     let mut editor_path = None;
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
@@ -137,6 +135,7 @@ impl SolverTab {
                                 &mut self.selected_path,
                                 &mut editor_path,
                                 &self.locked_ranges,
+                                &stacks_bb,
                                 &[],
                                 0,
                             );
@@ -149,7 +148,11 @@ impl SolverTab {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             if let Some(result) = self.result.clone() {
-                self.draw_result_panels(ui, &result);
+                egui::ScrollArea::both()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        self.draw_result_panels(ui, &result);
+                    });
             } else {
                 ui.vertical_centered(|ui| {
                     ui.add_space(40.0);
@@ -502,6 +505,23 @@ impl SolverTab {
             let label = node_at_path(&self.tree, &path).map(|node| node.label.clone());
 
             if let (Some(range_id), Some(label)) = (range_id, label) {
+                let stacks_bb = self.tree_stack_bbs();
+                let (is_raise, title) = node_at_path(&self.tree, &path)
+                    .map(|node| {
+                        let is_raise = matches!(node.action, Action::Raise);
+                        let amount = stacks_bb.get(node.player()).copied().unwrap_or(0.0);
+                        let verb = if is_raise { "raises" } else { "calls" };
+                        (
+                            is_raise,
+                            format!(
+                                "{} {verb} {amount:.2}bb: {:.1}%",
+                                node.player(),
+                                node.range_pct
+                            ),
+                        )
+                    })
+                    .unwrap_or((true, label.clone()));
+
                 ui.horizontal(|ui| {
                     let is_locked = self.locked_ranges.contains_key(&range_id);
                     let lock_text = if is_locked { "Locked" } else { "Lock" };
@@ -522,25 +542,21 @@ impl SolverTab {
                         );
                     }
                 });
-                ui.label(
-                    RichText::new("Кликните диапазон в дереве, чтобы изменить его.")
-                        .small()
-                        .weak(),
-                );
 
                 {
                     let mode = self
                         .matrix_modes
                         .entry(label.clone())
-                        .or_insert(MatrixMode::Frequency);
+                        .or_insert(MatrixMode::Ev);
                     if let Some(node) = node_at_path_mut(&mut self.tree, &path) {
                         range_matrix_ui(
                             ui,
                             &mut node.range,
                             ev_range.as_ref(),
                             mode,
-                            &label,
+                            &title,
                             false,
+                            is_raise,
                         );
                     }
                 }
@@ -635,6 +651,7 @@ impl SolverTab {
             ranking: rank_hands_for_slider(&node.range, node.ev_range.as_ref()),
             lock: self.locked_ranges.contains_key(&node.range_id),
             matrix_mode: MatrixMode::Frequency,
+            is_raise: matches!(node.action, Action::Raise),
         });
     }
 
@@ -711,6 +728,7 @@ impl SolverTab {
                     &mut editor.matrix_mode,
                     "",
                     true,
+                    editor.is_raise,
                 ) {
                     editor.slider_pct = combo_share(&editor.range) * 100.0;
                 }
@@ -824,6 +842,22 @@ impl SolverTab {
             rank_cache_strict: false,
             locked_ranges: self.locked_ranges.clone(),
         })
+    }
+
+    fn tree_stack_bbs(&self) -> HashMap<String, f64> {
+        let Some(result) = self.result.as_ref() else {
+            return HashMap::new();
+        };
+        let bb = result.input.big_blind.max(1e-9);
+        let players = result.input.stacks.len();
+        (0..players)
+            .map(|index| {
+                (
+                    position_label(players, index).to_string(),
+                    result.input.stacks[index] / bb,
+                )
+            })
+            .collect()
     }
 
     fn parse_prize_sum(&self) -> Option<f64> {
