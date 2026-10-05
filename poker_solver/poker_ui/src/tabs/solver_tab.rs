@@ -49,6 +49,8 @@ pub struct SolverTab {
     hands: Vec<SolverHand>,
     active: usize,
     next_hand_id: u64,
+    settings_open: bool,
+    settings_anim: f32,
 }
 
 struct SolverHand {
@@ -80,6 +82,8 @@ impl Default for SolverTab {
             hands: vec![SolverHand::new(1)],
             active: 0,
             next_hand_id: 2,
+            settings_open: true,
+            settings_anim: 1.0,
         }
     }
 }
@@ -104,7 +108,7 @@ impl SolverTab {
             });
 
         if let Some(hand) = self.hands.get_mut(self.active) {
-            hand.ui(ctx);
+            hand.ui(ctx, &mut self.settings_open, &mut self.settings_anim);
         }
     }
 
@@ -128,6 +132,17 @@ impl SolverTab {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing = egui::vec2(4.0, 0.0);
             ui.set_height(28.0);
+            if ui
+                .selectable_label(self.settings_open, "Настройки")
+                .on_hover_text("Показать или скрыть панель настроек")
+                .clicked()
+            {
+                self.settings_open = !self.settings_open;
+            }
+            if self.hands.get(self.active).is_some_and(|hand| hand.computing) {
+                ui.spinner();
+            }
+            ui.separator();
             let tabs_width = (ui.available_width() - 32.0).max(80.0);
 
             egui::ScrollArea::horizontal()
@@ -240,25 +255,8 @@ impl SolverHand {
         format!("#{}", self.id)
     }
 
-    fn ui(&mut self, ctx: &Context) {
-        egui::TopBottomPanel::top("solver_input_panel")
-            .resizable(false)
-            .show(ctx, |ui| {
-                ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
-                egui::CollapsingHeader::new("Настройки")
-                    .default_open(false)
-                    .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
-                        let max_h = (ctx.screen_rect().height() * 0.38).max(120.0);
-                        egui::ScrollArea::vertical()
-                            .max_height(max_h)
-                            .auto_shrink([false, true])
-                            .show(ui, |ui| {
-                                self.draw_settings(ui);
-                            });
-                    });
-                self.draw_action_row(ui, ctx);
-            });
+    fn ui(&mut self, ctx: &Context, settings_open: &mut bool, settings_anim: &mut f32) {
+        let overlay_rect = ctx.available_rect();
 
         if self.result.is_some() && !self.tree.is_empty() {
             let window_width = ctx.screen_rect().width();
@@ -328,11 +326,126 @@ impl SolverHand {
                     ui.vertical_centered(|ui| {
                         ui.add_space(40.0);
                         ui.label("Введите параметры и нажмите «Рассчитать».");
+                        if !*settings_open && ui.button("Открыть настройки").clicked() {
+                            *settings_open = true;
+                        }
                     });
                 }
             });
 
         self.draw_range_editor(ctx);
+        self.draw_settings_drawer(ctx, overlay_rect, settings_open, settings_anim);
+    }
+
+    fn draw_settings_drawer(
+        &mut self,
+        ctx: &Context,
+        overlay_rect: egui::Rect,
+        settings_open: &mut bool,
+        settings_anim: &mut f32,
+    ) {
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape))
+            && *settings_open
+            && self.range_editor.is_none()
+        {
+            *settings_open = false;
+        }
+
+        let dt = ctx.input(|i| i.unstable_dt).clamp(0.0, 1.0 / 30.0);
+        let target = if *settings_open { 1.0 } else { 0.0 };
+        *settings_anim += (target - *settings_anim) * (dt * 14.0).clamp(0.0, 1.0);
+        if (*settings_anim - target).abs() > 0.002 {
+            ctx.request_repaint();
+        } else {
+            *settings_anim = target;
+        }
+
+        if *settings_anim <= 0.001 {
+            return;
+        }
+
+        let panel_w = 380.0_f32.min(overlay_rect.width() * 0.92).max(280.0);
+        let x = overlay_rect.left() + (*settings_anim - 1.0) * panel_w;
+        let panel_rect = egui::Rect::from_min_size(
+            egui::pos2(x, overlay_rect.top()),
+            egui::vec2(panel_w, overlay_rect.height()),
+        );
+        let dim_alpha = (*settings_anim * 120.0).round() as u8;
+        let dim_rect = egui::Rect::from_min_max(
+            egui::pos2(panel_rect.right().max(overlay_rect.left()), overlay_rect.top()),
+            overlay_rect.max,
+        );
+
+        if dim_rect.width() > 1.0 && dim_rect.height() > 1.0 {
+            let dim_response = egui::Area::new(egui::Id::new("solver_settings_dim"))
+                .order(egui::Order::Middle)
+                .fixed_pos(dim_rect.min)
+                .movable(false)
+                .interactable(true)
+                .fade_in(false)
+                .show(ctx, |ui| {
+                    let (rect, response) =
+                        ui.allocate_exact_size(dim_rect.size(), egui::Sense::click());
+                    ui.painter().rect_filled(
+                        rect,
+                        0.0,
+                        egui::Color32::from_black_alpha(dim_alpha),
+                    );
+                    response
+                })
+                .inner;
+
+            if *settings_open && dim_response.clicked() {
+                *settings_open = false;
+            }
+        }
+
+        egui::Area::new(egui::Id::new("solver_settings_drawer"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(panel_rect.min)
+            .movable(false)
+            .interactable(true)
+            .constrain(false)
+            .fade_in(false)
+            .show(ctx, |ui| {
+                ui.set_min_size(panel_rect.size());
+                ui.set_max_size(panel_rect.size());
+                egui::Frame::window(&ctx.style())
+                    .fill(ctx.style().visuals.panel_fill)
+                    .inner_margin(egui::Margin::same(12.0))
+                    .shadow(egui::Shadow {
+                        offset: egui::vec2(8.0, 0.0),
+                        blur: 22.0,
+                        spread: 0.0,
+                        color: egui::Color32::from_black_alpha(70),
+                    })
+                    .show(ui, |ui| {
+                        ui.set_min_height(overlay_rect.height() - 24.0);
+                        ui.set_width(panel_w - 24.0);
+                        ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+
+                        ui.horizontal(|ui| {
+                            ui.heading("Настройки");
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui.button("×").on_hover_text("Закрыть").clicked() {
+                                        *settings_open = false;
+                                    }
+                                },
+                            );
+                        });
+                        ui.separator();
+                        self.draw_action_row(ui, ctx);
+                        ui.separator();
+                        egui::ScrollArea::vertical()
+                            .id_salt("solver_settings_scroll")
+                            .auto_shrink([false, true])
+                            .show(ui, |ui| {
+                                self.draw_settings(ui);
+                            });
+                    });
+            });
     }
 
     fn poll(&mut self, ctx: &Context) {
@@ -1173,6 +1286,7 @@ fn draw_hand_tab(
     closable: bool,
 ) -> (bool, bool, bool) {
     let mut close_clicked = false;
+    let mut close_contains = false;
     let visuals = ui.visuals().clone();
     let fill = if selected {
         visuals.panel_fill
@@ -1209,8 +1323,10 @@ fn draw_hand_tab(
                     let close = ui.add(
                         egui::Button::new(RichText::new("×").size(14.0).color(text_color))
                             .frame(false)
-                            .min_size(egui::vec2(14.0, 14.0)),
+                            .sense(egui::Sense::click())
+                            .min_size(egui::vec2(18.0, 18.0)),
                     );
+                    close_contains = close.hovered() || close.contains_pointer();
                     if close.on_hover_text("Закрыть").clicked() {
                         close_clicked = true;
                     }
@@ -1222,10 +1338,13 @@ fn draw_hand_tab(
         .response
         .interact(egui::Sense::click())
         .on_hover_text(format!("Раздача {title}"));
+    if close_contains && (response.clicked() || close_clicked) {
+        close_clicked = true;
+    }
     (
         response.clicked() && !close_clicked,
         close_clicked,
-        response.middle_clicked(),
+        response.middle_clicked() && !close_clicked,
     )
 }
 
