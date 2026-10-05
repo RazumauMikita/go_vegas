@@ -201,19 +201,6 @@ impl ImportTab {
 
         self.clamp_selection();
 
-        egui::TopBottomPanel::bottom("import_outline")
-            .resizable(true)
-            .default_height(140.0)
-            .min_height(72.0)
-            .show(ctx, |ui| {
-                ui.heading("Outline");
-                egui::ScrollArea::both()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        self.draw_outline(ui);
-                    });
-            });
-
         egui::SidePanel::left("import_lists")
             .resizable(true)
             .default_width(ctx.screen_rect().width() * 0.58)
@@ -225,6 +212,21 @@ impl ImportTab {
                 });
                 ui.separator();
                 self.draw_hand_table(ui);
+            });
+
+        let max_outline = (ctx.available_rect().height() * 0.42).max(90.0);
+        egui::TopBottomPanel::bottom("import_outline")
+            .resizable(true)
+            .default_height(148.0)
+            .min_height(72.0)
+            .max_height(max_outline)
+            .show(ctx, |ui| {
+                ui.heading("Outline");
+                egui::ScrollArea::both()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        self.draw_outline(ui);
+                    });
             });
 
         egui::CentralPanel::default()

@@ -18,12 +18,14 @@ use crate::solver::{
 use crate::three_way_rank_cache::ThreeWayRankCache;
 
 const DEFAULT_TOLERANCE: f64 = 0.005;
-const MIN_CONVERGENCE_ITERS: usize = 200;
+const MIN_CONVERGENCE_ITERS: usize = 160;
+const THREE_LIVE: usize = 40;
+const FOUR_LIVE: usize = 12;
 const DCFR_ALPHA: f64 = 1.5;
 const DCFR_BETA: f64 = 0.5;
 const DCFR_GAMMA: f64 = 1.0;
 const BUCKETS: usize = NUM_BUCKETS;
-const QUADS: usize = BUCKETS * BUCKETS * BUCKETS * BUCKETS;
+const LIVE: f64 = 1e-12;
 
 const N_UTG: usize = 0;
 const N_BTN_CALL: usize = 1;
@@ -115,7 +117,8 @@ struct Model {
     three_pay: [[[f64; 6]; 4]; 4],
     three_slots: [[usize; 3]; 4],
     three_folder: [usize; 4],
-    four_pay: Vec<[f32; 4]>,
+    four_cache: FourWayRankCache,
+    four_icm: [[f64; 4]; 24],
 }
 
 struct Terminals {
@@ -471,13 +474,15 @@ impl SolverAlgorithm for Cfr4Max {
             self.has_converged = true;
         }
 
-        eprintln!(
-            "Iter {}: {:.2}s last_mean={:.6} avg_mean={:.6}",
-            self.iterations_done,
-            iter_started.elapsed().as_secs_f64(),
-            last_change / n,
-            avg_change / n
-        );
+        if self.iterations_done == 1 || self.iterations_done % 25 == 0 || self.has_converged {
+            eprintln!(
+                "Iter {}: {:.2}s last_mean={:.6} avg_mean={:.6}",
+                self.iterations_done,
+                iter_started.elapsed().as_secs_f64(),
+                last_change / n,
+                avg_change / n
+            );
+        }
     }
 
     fn converged(&self) -> bool {
@@ -1010,22 +1015,7 @@ impl Model {
         }
 
         cards()?;
-        eprintln!("4-max: payoff table ({QUADS} bucket quads)");
         let four_cache = load_four_way()?;
-        let four_pay: Vec<[f32; 4]> = (0..QUADS)
-            .map(|idx| {
-                let (ug, bg, sg, bbg) = decode_quad(idx);
-                let dist = four_cache.lookup(ug, bg, sg, bbg);
-                let mut pay = [0.0_f32; 4];
-                for perm in 0..24 {
-                    let p = dist[perm] as f32;
-                    for seat in 0..4 {
-                        pay[seat] += p * four_icm[perm][seat] as f32;
-                    }
-                }
-                pay
-            })
-            .collect();
 
         Some(Self {
             map,
@@ -1034,7 +1024,8 @@ impl Model {
             three_pay,
             three_slots,
             three_folder,
-            four_pay,
+            four_cache,
+            four_icm,
         })
     }
 
@@ -1084,7 +1075,8 @@ impl Model {
                 &freq[N_SB_PC],
                 &freq[N_BB_4],
             ],
-            &self.four_pay,
+            &self.four_icm,
+            &self.four_cache,
         );
 
         Terminals {
@@ -1171,34 +1163,23 @@ fn hu_uncond(range_a: &[f64; HAND_TYPES], range_b: &[f64; HAND_TYPES], shared: &
     }
 }
 
-struct ThreeAccum {
-    num: [[f64; HAND_TYPES]; 3],
-    den: [[f64; HAND_TYPES]; 3],
-    folder_num: f64,
-    folder_den: f64,
+fn live_hands(range: &[f64; HAND_TYPES], cap: usize, shared: &Shared) -> Vec<usize> {
+    let mut items: Vec<(usize, f64)> = (0..HAND_TYPES)
+        .filter_map(|h| {
+            let w = shared.combos[h] * range[h].clamp(0.0, 1.0);
+            (w > 1e-4).then_some((h, w))
+        })
+        .collect();
+    items.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    items.into_iter().take(cap).map(|(h, _)| h).collect()
 }
 
-impl ThreeAccum {
-    fn new() -> Self {
-        Self {
-            num: [[0.0; HAND_TYPES]; 3],
-            den: [[0.0; HAND_TYPES]; 3],
-            folder_num: 0.0,
-            folder_den: 0.0,
-        }
-    }
-
-    fn merge(mut self, other: Self) -> Self {
-        for slot in 0..3 {
-            for h in 0..HAND_TYPES {
-                self.num[slot][h] += other.num[slot][h];
-                self.den[slot][h] += other.den[slot][h];
-            }
-        }
-        self.folder_num += other.folder_num;
-        self.folder_den += other.folder_den;
-        self
-    }
+fn live_buckets(mass: &[f64; BUCKETS], cap: usize) -> Vec<usize> {
+    let mut items: Vec<(usize, f64)> = (0..BUCKETS)
+        .filter_map(|b| (mass[b] > LIVE).then_some((b, mass[b])))
+        .collect();
+    items.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    items.into_iter().take(cap).map(|(b, _)| b).collect()
 }
 
 fn fill_three(
@@ -1217,58 +1198,54 @@ fn fill_three(
     }
     let slot_pay = [seat_pay[slots[0]], seat_pay[slots[1]], seat_pay[slots[2]]];
     let folder_pay = seat_pay[folder];
+    let live = [
+        live_hands(ranges[0], THREE_LIVE, shared),
+        live_hands(ranges[1], THREE_LIVE, shared),
+        live_hands(ranges[2], THREE_LIVE, shared),
+    ];
+    let mut num = [[0.0; HAND_TYPES]; 3];
+    let mut den = [[0.0; HAND_TYPES]; 3];
+    let mut folder_num = 0.0;
+    let mut folder_den = 0.0;
 
-    let acc = (0..HAND_TYPES)
-        .into_par_iter()
-        .fold(ThreeAccum::new, |mut acc, h0| {
+    if !live[0].is_empty() && !live[1].is_empty() && !live[2].is_empty() {
+        for &h0 in &live[0] {
             let w0 = weight[0][h0];
-            for h1 in 0..HAND_TYPES {
+            for &h1 in &live[1] {
                 if types_block(h0, h1, shared) {
                     continue;
                 }
                 let w1 = weight[1][h1];
-                if w0 == 0.0 && w1 == 0.0 {
-                    continue;
-                }
                 let row = &shared.three[(h0 * HAND_TYPES + h1) * HAND_TYPES
                     ..(h0 * HAND_TYPES + h1) * HAND_TYPES + HAND_TYPES];
-                for h2 in 0..HAND_TYPES {
+                for &h2 in &live[2] {
                     let w2 = weight[2][h2];
-                    if w2 == 0.0 && w0 * w1 == 0.0 {
+                    if w2 <= 0.0 {
                         continue;
                     }
                     if types_block(h0, h2, shared) || types_block(h1, h2, shared) {
                         continue;
                     }
                     let probs = row[h2];
-                    if w1 > 0.0 && w2 > 0.0 {
-                        let w = w1 * w2;
-                        let pay = dot6(probs, &slot_pay[0]);
-                        acc.num[0][h0] += w * pay;
-                        acc.den[0][h0] += w;
-                    }
-                    if w0 > 0.0 && w2 > 0.0 {
-                        let w = w0 * w2;
-                        let pay = dot6(probs, &slot_pay[1]);
-                        acc.num[1][h1] += w * pay;
-                        acc.den[1][h1] += w;
-                    }
-                    if w0 > 0.0 && w1 > 0.0 {
-                        let w = w0 * w1;
-                        let pay = dot6(probs, &slot_pay[2]);
-                        acc.num[2][h2] += w * pay;
-                        acc.den[2][h2] += w;
-                    }
-                    if w0 > 0.0 && w1 > 0.0 && w2 > 0.0 {
-                        let w = w0 * w1 * w2;
-                        acc.folder_num += w * dot6(probs, &folder_pay);
-                        acc.folder_den += w;
-                    }
+                    let pay0 = dot6(probs, &slot_pay[0]);
+                    let pay1 = dot6(probs, &slot_pay[1]);
+                    let pay2 = dot6(probs, &slot_pay[2]);
+                    let opp0 = w1 * w2;
+                    let opp1 = w0 * w2;
+                    let opp2 = w0 * w1;
+                    num[0][h0] += opp0 * pay0;
+                    den[0][h0] += opp0;
+                    num[1][h1] += opp1 * pay1;
+                    den[1][h1] += opp1;
+                    num[2][h2] += opp2 * pay2;
+                    den[2][h2] += opp2;
+                    let w = w0 * w1 * w2;
+                    folder_num += w * dot6(probs, &folder_pay);
+                    folder_den += w;
                 }
             }
-            acc
-        })
-        .reduce(ThreeAccum::new, ThreeAccum::merge);
+        }
+    }
 
     let fallback = [
         mean6(&slot_pay[0]),
@@ -1278,118 +1255,91 @@ fn fill_three(
     for slot in 0..3 {
         let seat = slots[slot];
         for h in 0..HAND_TYPES {
-            out[seat][h] = if acc.den[slot][h] > 0.0 {
-                acc.num[slot][h] / acc.den[slot][h]
+            out[seat][h] = if den[slot][h] > 0.0 {
+                num[slot][h] / den[slot][h]
             } else {
                 fallback[slot]
             };
         }
     }
-    let folder_ev = if acc.folder_den > 0.0 {
-        acc.folder_num / acc.folder_den
+    let folder_ev = if folder_den > 0.0 {
+        folder_num / folder_den
     } else {
         mean6(&folder_pay)
     };
     out[folder] = [folder_ev; HAND_TYPES];
 }
 
-fn fill_four(ranges: [&[f64; HAND_TYPES]; 4], pay: &[[f32; 4]]) -> [[f64; HAND_TYPES]; 4] {
+fn fill_four(
+    ranges: [&[f64; HAND_TYPES]; 4],
+    icm: &[[f64; 4]; 24],
+    cache: &FourWayRankCache,
+) -> [[f64; HAND_TYPES]; 4] {
     let shared = shared_cards();
-    let mut blocked = vec![0.0; 4 * BUCKETS * 4 * BUCKETS];
-    for hero_seat in 0..4 {
-        for hero_bucket in 0..BUCKETS {
-            for opp_seat in 0..4 {
-                if opp_seat == hero_seat {
+    let mut mass = [[0.0; BUCKETS]; 4];
+    for slot in 0..4 {
+        for h in 0..HAND_TYPES {
+            mass[slot][shared.bucket[h] as usize] +=
+                shared.combos[h] * ranges[slot][h].clamp(0.0, 1.0);
+        }
+    }
+    let live: [Vec<usize>; 4] = std::array::from_fn(|slot| live_buckets(&mass[slot], FOUR_LIVE));
+    let mut num = [[0.0; BUCKETS]; 4];
+    let mut den = [[0.0; BUCKETS]; 4];
+
+    if live.iter().all(|v| !v.is_empty()) {
+        for &ug in &live[0] {
+            for &bg in &live[1] {
+                if buckets_conflict(ug, bg, shared) {
                     continue;
                 }
-                for hand in 0..HAND_TYPES {
-                    let bucket = shared.bucket[hand] as usize;
-                    if buckets_conflict(hero_bucket, bucket, shared) {
+                for &sg in &live[2] {
+                    if buckets_conflict(ug, sg, shared) || buckets_conflict(bg, sg, shared) {
                         continue;
                     }
-                    let idx =
-                        (((hero_seat * BUCKETS + hero_bucket) * 4 + opp_seat) * BUCKETS) + bucket;
-                    blocked[idx] += shared.combos[hand] * ranges[opp_seat][hand].clamp(0.0, 1.0);
+                    for &bbg in &live[3] {
+                        if buckets_conflict(ug, bbg, shared)
+                            || buckets_conflict(bg, bbg, shared)
+                            || buckets_conflict(sg, bbg, shared)
+                        {
+                            continue;
+                        }
+                        let dist = cache.lookup(ug as u8, bg as u8, sg as u8, bbg as u8);
+                        let mut cell = [0.0; 4];
+                        for perm in 0..24 {
+                            for seat in 0..4 {
+                                cell[seat] += dist[perm] * icm[perm][seat];
+                            }
+                        }
+                        let opp = [
+                            mass[1][bg] * mass[2][sg] * mass[3][bbg],
+                            mass[0][ug] * mass[2][sg] * mass[3][bbg],
+                            mass[0][ug] * mass[1][bg] * mass[3][bbg],
+                            mass[0][ug] * mass[1][bg] * mass[2][sg],
+                        ];
+                        let buckets = [ug, bg, sg, bbg];
+                        for seat in 0..4 {
+                            let w = opp[seat];
+                            if w <= 0.0 {
+                                continue;
+                            }
+                            let b = buckets[seat];
+                            num[seat][b] += w * cell[seat];
+                            den[seat][b] += w;
+                        }
+                    }
                 }
             }
         }
     }
 
-    let mass = |hero_seat: usize, hero_bucket: usize, opp_seat: usize, opp_bucket: usize| -> f64 {
-        blocked[(((hero_seat * BUCKETS + hero_bucket) * 4 + opp_seat) * BUCKETS) + opp_bucket]
-    };
-
-    let acc = (0..BUCKETS)
-        .into_par_iter()
-        .fold(
-            || ([[0.0; BUCKETS]; 4], [[0.0; BUCKETS]; 4]),
-            |mut acc, ug| {
-                for bg in 0..BUCKETS {
-                    if buckets_conflict(ug, bg, shared) {
-                        continue;
-                    }
-                    for sg in 0..BUCKETS {
-                        if buckets_conflict(ug, sg, shared) || buckets_conflict(bg, sg, shared) {
-                            continue;
-                        }
-                        for bbg in 0..BUCKETS {
-                            if buckets_conflict(ug, bbg, shared)
-                                || buckets_conflict(bg, bbg, shared)
-                                || buckets_conflict(sg, bbg, shared)
-                            {
-                                continue;
-                            }
-                            let w_utg =
-                                mass(0, ug, 1, bg) * mass(0, ug, 2, sg) * mass(0, ug, 3, bbg);
-                            let w_btn =
-                                mass(1, bg, 0, ug) * mass(1, bg, 2, sg) * mass(1, bg, 3, bbg);
-                            let w_sb =
-                                mass(2, sg, 0, ug) * mass(2, sg, 1, bg) * mass(2, sg, 3, bbg);
-                            let w_bb =
-                                mass(3, bbg, 0, ug) * mass(3, bbg, 1, bg) * mass(3, bbg, 2, sg);
-                            if w_utg == 0.0 && w_btn == 0.0 && w_sb == 0.0 && w_bb == 0.0 {
-                                continue;
-                            }
-                            let cell = pay[((ug * BUCKETS + bg) * BUCKETS + sg) * BUCKETS + bbg];
-                            let weights = [w_utg, w_btn, w_sb, w_bb];
-                            let buckets = [ug, bg, sg, bbg];
-                            for seat in 0..4 {
-                                let w = weights[seat];
-                                if w == 0.0 {
-                                    continue;
-                                }
-                                let b = buckets[seat];
-                                acc.0[seat][b] += w * f64::from(cell[seat]);
-                                acc.1[seat][b] += w;
-                            }
-                        }
-                    }
-                }
-                acc
-            },
-        )
-        .reduce(
-            || ([[0.0; BUCKETS]; 4], [[0.0; BUCKETS]; 4]),
-            |mut a, b| {
-                for seat in 0..4 {
-                    for bucket in 0..BUCKETS {
-                        a.0[seat][bucket] += b.0[seat][bucket];
-                        a.1[seat][bucket] += b.1[seat][bucket];
-                    }
-                }
-                a
-            },
-        );
-
     let mut out = [[0.0; HAND_TYPES]; 4];
     for seat in 0..4 {
-        let mut by_bucket = [0.0; BUCKETS];
+        let mut by_bucket = [0.25; BUCKETS];
         for bucket in 0..BUCKETS {
-            by_bucket[bucket] = if acc.1[seat][bucket] > 0.0 {
-                acc.0[seat][bucket] / acc.1[seat][bucket]
-            } else {
-                0.25
-            };
+            if den[seat][bucket] > 0.0 {
+                by_bucket[bucket] = num[seat][bucket] / den[seat][bucket];
+            }
         }
         for hand in 0..HAND_TYPES {
             out[seat][hand] = by_bucket[shared.bucket[hand] as usize];
@@ -1520,16 +1470,6 @@ fn effective4(stacks: [f64; 4]) -> ([f64; 4], [f64; 4]) {
         uncalled[i] = (stacks[i] - contested[i]).max(0.0);
     }
     (contested, uncalled)
-}
-
-fn decode_quad(idx: usize) -> (u8, u8, u8, u8) {
-    let bbg = idx % BUCKETS;
-    let rem = idx / BUCKETS;
-    let sg = rem % BUCKETS;
-    let rem = rem / BUCKETS;
-    let bg = rem % BUCKETS;
-    let ug = rem / BUCKETS;
-    (ug as u8, bg as u8, sg as u8, bbg as u8)
 }
 
 fn cards() -> Option<&'static Shared> {

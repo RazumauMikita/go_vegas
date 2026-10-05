@@ -19,7 +19,10 @@ use crate::solver::{
 use crate::three_way_rank_cache::ThreeWayRankCache;
 
 const DEFAULT_TOLERANCE: f64 = 0.005;
-const MIN_CONVERGENCE_ITERS: usize = 200;
+const MIN_CONVERGENCE_ITERS: usize = 160;
+const THREE_LIVE: usize = 40;
+const FOUR_LIVE: usize = 12;
+const FIVE_LIVE: usize = 8;
 const DCFR_ALPHA: f64 = 1.5;
 const DCFR_BETA: f64 = 0.5;
 const DCFR_GAMMA: f64 = 1.0;
@@ -264,17 +267,28 @@ impl SolverAlgorithm for Cfr5Max {
         let terminals = self.model.terminals(&freq);
         let t = (self.iterations_done + 1) as f64;
 
-        for node in 0..NODES {
-            if self.input.is_locked(node) {
-                continue;
-            }
-            for hand in 0..HAND_TYPES {
-                let ev = action_ev(node, hand, &opp, &terminals);
-                let sigma = self.strategy[node][hand];
-                let reach = reach_of(node, hand, &opp);
-                dcfr(&mut self.regret[node], hand, ev, sigma, reach, t);
-            }
-        }
+        let locked: std::collections::HashSet<usize> =
+            self.input.locked_ranges.keys().copied().collect();
+        self.regret
+            .par_iter_mut()
+            .zip(self.strategy.par_iter())
+            .enumerate()
+            .for_each(|(node, (regret, strategy))| {
+                if locked.contains(&node) {
+                    return;
+                }
+                for hand in 0..HAND_TYPES {
+                    let ev = action_ev(node, hand, &opp, &terminals);
+                    dcfr(
+                        regret,
+                        hand,
+                        ev,
+                        strategy[hand],
+                        reach_of(node, hand, &opp),
+                        t,
+                    );
+                }
+            });
 
         if t > 1.0 {
             self.accumulate(&freq, t);
@@ -301,13 +315,15 @@ impl SolverAlgorithm for Cfr5Max {
             self.has_converged = true;
         }
 
-        eprintln!(
-            "Iter {}: {:.2}s last_mean={:.6} avg_mean={:.6}",
-            self.iterations_done,
-            iter_started.elapsed().as_secs_f64(),
-            last_change / n,
-            avg_change / n
-        );
+        if self.iterations_done == 1 || self.iterations_done % 25 == 0 || self.has_converged {
+            eprintln!(
+                "Iter {}: {:.2}s last_mean={:.6} avg_mean={:.6}",
+                self.iterations_done,
+                iter_started.elapsed().as_secs_f64(),
+                last_change / n,
+                avg_change / n
+            );
+        }
     }
 
     fn converged(&self) -> bool {
@@ -694,57 +710,87 @@ impl Model {
             }
         }
 
-        for term in &self.hus {
-            let range_a = range_of(term.a, term.mask, freq);
-            let range_b = range_of(term.b, term.mask, freq);
-            fill_hu(
-                &mut by_mask[term.mask as usize],
-                term.a,
-                term.b,
-                range_a,
-                range_b,
-                term.icm_a,
-                term.icm_b,
-            );
-        }
-
         let shared = shared_cards();
-        for term in &self.threes {
-            let ranges = [
-                range_of(term.seats[0], term.mask, freq),
-                range_of(term.seats[1], term.mask, freq),
-                range_of(term.seats[2], term.mask, freq),
-            ];
-            fill_three(
-                ranges,
-                term.seats,
-                &term.icm,
-                (0..PLAYERS)
-                    .filter(|&i| term.mask & (1 << i) == 0)
-                    .collect::<Vec<_>>(),
-                shared,
-                &mut by_mask[term.mask as usize],
-            );
+        let ((hus, threes), fours) = rayon::join(
+            || {
+                rayon::join(
+                    || {
+                        self.hus
+                            .par_iter()
+                            .map(|term| {
+                                let mut out = [[0.0; HAND_TYPES]; PLAYERS];
+                                fill_hu(
+                                    &mut out,
+                                    term.a,
+                                    term.b,
+                                    range_of(term.a, term.mask, freq),
+                                    range_of(term.b, term.mask, freq),
+                                    term.icm_a,
+                                    term.icm_b,
+                                );
+                                (term.mask, out)
+                            })
+                            .collect::<Vec<_>>()
+                    },
+                    || {
+                        self.threes
+                            .par_iter()
+                            .map(|term| {
+                                let mut out = [[0.0; HAND_TYPES]; PLAYERS];
+                                fill_three(
+                                    [
+                                        range_of(term.seats[0], term.mask, freq),
+                                        range_of(term.seats[1], term.mask, freq),
+                                        range_of(term.seats[2], term.mask, freq),
+                                    ],
+                                    term.seats,
+                                    &term.icm,
+                                    (0..PLAYERS)
+                                        .filter(|&i| term.mask & (1 << i) == 0)
+                                        .collect::<Vec<_>>(),
+                                    shared,
+                                    &mut out,
+                                );
+                                (term.mask, out)
+                            })
+                            .collect::<Vec<_>>()
+                    },
+                )
+            },
+            || {
+                self.fours
+                    .par_iter()
+                    .map(|term| {
+                        let mut out = [[0.0; HAND_TYPES]; PLAYERS];
+                        fill_four(
+                            [
+                                range_of(term.seats[0], term.mask, freq),
+                                range_of(term.seats[1], term.mask, freq),
+                                range_of(term.seats[2], term.mask, freq),
+                                range_of(term.seats[3], term.mask, freq),
+                            ],
+                            term.seats,
+                            &term.icm,
+                            (0..PLAYERS)
+                                .find(|&i| term.mask & (1 << i) == 0)
+                                .unwrap_or(0),
+                            &self.four_cache,
+                            shared,
+                            &mut out,
+                        );
+                        (term.mask, out)
+                    })
+                    .collect::<Vec<_>>()
+            },
+        );
+        for (mask, out) in hus {
+            by_mask[mask as usize] = out;
         }
-
-        for term in &self.fours {
-            let ranges = [
-                range_of(term.seats[0], term.mask, freq),
-                range_of(term.seats[1], term.mask, freq),
-                range_of(term.seats[2], term.mask, freq),
-                range_of(term.seats[3], term.mask, freq),
-            ];
-            fill_four(
-                ranges,
-                term.seats,
-                &term.icm,
-                (0..PLAYERS)
-                    .find(|&i| term.mask & (1 << i) == 0)
-                    .unwrap_or(0),
-                &self.four_cache,
-                shared,
-                &mut by_mask[term.mask as usize],
-            );
+        for (mask, out) in threes {
+            by_mask[mask as usize] = out;
+        }
+        for (mask, out) in fours {
+            by_mask[mask as usize] = out;
         }
 
         let five_ranges = [
@@ -841,11 +887,11 @@ fn hu_uncond(range_a: &[f64; HAND_TYPES], range_b: &[f64; HAND_TYPES], shared: &
     }
 }
 
-fn live_hands(range: &[f64; HAND_TYPES], cap: usize) -> Vec<usize> {
+fn live_hands(range: &[f64; HAND_TYPES], cap: usize, shared: &Shared) -> Vec<usize> {
     let mut items: Vec<(usize, f64)> = (0..HAND_TYPES)
         .filter_map(|h| {
-            let w = range[h].clamp(0.0, 1.0);
-            (w > LIVE).then_some((h, w))
+            let w = shared.combos[h] * range[h].clamp(0.0, 1.0);
+            (w > 1e-4).then_some((h, w))
         })
         .collect();
     items.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -875,54 +921,14 @@ fn fill_three(
         }
     }
     let live = [
-        live_hands(ranges[0], 40),
-        live_hands(ranges[1], 40),
-        live_hands(ranges[2], 40),
+        live_hands(ranges[0], THREE_LIVE, shared),
+        live_hands(ranges[1], THREE_LIVE, shared),
+        live_hands(ranges[2], THREE_LIVE, shared),
     ];
     let mut num = [[0.0; HAND_TYPES]; 3];
     let mut den = [[0.0; HAND_TYPES]; 3];
     let mut folder_num = [0.0; PLAYERS];
     let mut folder_den = 0.0;
-
-    for slot in 0..3 {
-        let (o1, o2) = match slot {
-            0 => (1, 2),
-            1 => (0, 2),
-            _ => (0, 1),
-        };
-        if live[o1].is_empty() || live[o2].is_empty() {
-            continue;
-        }
-        for h in 0..HAND_TYPES {
-            for &h1 in &live[o1] {
-                if shared.block[h][h1] {
-                    continue;
-                }
-                let w1 = weight[o1][h1];
-                for &h2 in &live[o2] {
-                    if shared.block[h][h2] || shared.block[h1][h2] {
-                        continue;
-                    }
-                    let w2 = weight[o2][h2];
-                    let w = w1 * w2;
-                    if w <= 0.0 {
-                        continue;
-                    }
-                    let (a, b, c) = match slot {
-                        0 => (h, h1, h2),
-                        1 => (h1, h, h2),
-                        _ => (h1, h2, h),
-                    };
-                    let probs = shared
-                        .three
-                        .get(a as u8, b as u8, c as u8)
-                        .unwrap_or([1.0 / 6.0; 6]);
-                    num[slot][h] += w * dot_icm(&probs, icm, seats[slot]);
-                    den[slot][h] += w;
-                }
-            }
-        }
-    }
 
     if !live[0].is_empty() && !live[1].is_empty() && !live[2].is_empty() {
         for &h0 in &live[0] {
@@ -936,14 +942,27 @@ fn fill_three(
                     if shared.block[h0][h2] || shared.block[h1][h2] {
                         continue;
                     }
-                    let w = w0 * w1 * weight[2][h2];
-                    if w <= 0.0 {
+                    let w2 = weight[2][h2];
+                    if w2 <= 0.0 {
                         continue;
                     }
                     let probs = shared
                         .three
                         .get(h0 as u8, h1 as u8, h2 as u8)
                         .unwrap_or([1.0 / 6.0; 6]);
+                    let pay0 = dot_icm(&probs, icm, seats[0]);
+                    let pay1 = dot_icm(&probs, icm, seats[1]);
+                    let pay2 = dot_icm(&probs, icm, seats[2]);
+                    let opp0 = w1 * w2;
+                    let opp1 = w0 * w2;
+                    let opp2 = w0 * w1;
+                    num[0][h0] += opp0 * pay0;
+                    den[0][h0] += opp0;
+                    num[1][h1] += opp1 * pay1;
+                    den[1][h1] += opp1;
+                    num[2][h2] += opp2 * pay2;
+                    den[2][h2] += opp2;
+                    let w = w0 * w1 * w2;
                     for &folder in &folders {
                         folder_num[folder] += w * dot_icm(&probs, icm, folder);
                     }
@@ -990,22 +1009,16 @@ fn fill_four(
                 shared.combos[h] * ranges[slot][h].clamp(0.0, 1.0);
         }
     }
-    let live: [Vec<usize>; 4] = std::array::from_fn(|slot| live_buckets(&mass[slot], 12));
+    let live: [Vec<usize>; 4] = std::array::from_fn(|slot| live_buckets(&mass[slot], FOUR_LIVE));
 
     let mut num = [[0.0; BUCKETS]; 4];
     let mut den = [[0.0; BUCKETS]; 4];
     let mut folder_num = 0.0;
     let mut folder_den = 0.0;
 
-    let hero_buckets: [Vec<usize>; 4] = std::array::from_fn(|_| {
-        (0..BUCKETS)
-            .filter(|&b| shared.bucket_mask[b] != 0)
-            .collect()
-    });
-
     for slot in 0..4 {
         let others: Vec<usize> = (0..4).filter(|&s| s != slot).collect();
-        for &hb in &hero_buckets[slot] {
+        for &hb in &live[slot] {
             for &b1 in &live[others[0]] {
                 if buckets_conflict(hb, b1, shared) {
                     continue;
@@ -1110,10 +1123,7 @@ fn fill_five(
                 shared.combos[h] * ranges[seat][h].clamp(0.0, 1.0);
         }
     }
-    let live: [Vec<usize>; 5] = std::array::from_fn(|seat| live_buckets(&mass[seat], 8));
-    let hero_buckets: Vec<usize> = (0..BUCKETS)
-        .filter(|&b| shared.bucket_mask[b] != 0)
-        .collect();
+    let live: [Vec<usize>; 5] = std::array::from_fn(|seat| live_buckets(&mass[seat], FIVE_LIVE));
 
     let mut num = [[0.0; BUCKETS]; 5];
     let mut den = [[0.0; BUCKETS]; 5];
@@ -1121,7 +1131,7 @@ fn fill_five(
 
     for hero in 0..5 {
         let others: Vec<usize> = (0..5).filter(|&s| s != hero).collect();
-        for &hb in &hero_buckets {
+        for &hb in &live[hero] {
             nested_four(&live, &others, |ob| {
                 let mut buckets = [0usize; 5];
                 buckets[hero] = hb;
