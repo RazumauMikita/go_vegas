@@ -1,7 +1,9 @@
 use poker_core::{combo_index, combo_label, index_to_ranks, Card};
 
-const CELL_W: f32 = 44.0;
-const CELL_H: f32 = 36.0;
+const CELL_MIN: f32 = 14.0;
+const GRID_GAP: f32 = 1.0;
+const BAR_H: f32 = 20.0;
+const HEADER_H: f32 = 24.0;
 const IN_RANGE_EPS: f64 = 0.5;
 
 const HRC_GREEN: egui::Color32 = egui::Color32::from_rgb(110, 198, 82);
@@ -115,119 +117,120 @@ pub fn range_matrix_ui(
     is_raise: bool,
 ) -> bool {
     let share = combo_share(range);
-    let grid_width = CELL_W * 13.0 + 12.0;
-
-    if !title.is_empty() {
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(grid_width, 22.0), egui::Sense::hover());
-        ui.painter().rect_filled(rect, 0.0, HRC_HEADER);
-        ui.painter().text(
-            rect.left_center() + egui::vec2(8.0, 0.0),
-            egui::Align2::LEFT_CENTER,
-            title,
-            egui::FontId::proportional(13.0),
-            egui::Color32::WHITE,
-        );
-    }
+    let width = ui.available_width().max(13.0 * CELL_MIN);
 
     ui.horizontal(|ui| {
         ui.selectable_value(mode, MatrixMode::Ev, "EV");
         ui.selectable_value(mode, MatrixMode::Frequency, "Frequency");
     });
+
+    if !title.is_empty() {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(width, HEADER_H), egui::Sense::hover());
+        ui.painter().rect_filled(rect, 0.0, HRC_HEADER);
+        let title_font = (rect.height() * 0.55).clamp(11.0, 16.0);
+        ui.painter().text(
+            rect.left_center() + egui::vec2(8.0, 0.0),
+            egui::Align2::LEFT_CENTER,
+            title,
+            egui::FontId::proportional(title_font),
+            egui::Color32::WHITE,
+        );
+    }
+
     ui.add_space(2.0);
+    let grid_h = (ui.available_height() - BAR_H - 4.0).max(13.0 * CELL_MIN);
+    let grid_w = ui.available_width().max(13.0 * CELL_MIN);
+    let (grid_rect, _) = ui.allocate_exact_size(egui::vec2(grid_w, grid_h), egui::Sense::hover());
+
+    let cell_w = ((grid_rect.width() - GRID_GAP * 12.0) / 13.0).max(1.0);
+    let cell_h = ((grid_rect.height() - GRID_GAP * 12.0) / 13.0).max(1.0);
+    let label_font = (cell_h * 0.30).clamp(8.0, 22.0);
+    let value_font = (cell_h * 0.24).clamp(7.0, 18.0);
 
     let paint_id = ui.id().with("range_paint");
     let mut changed = false;
     let can_edit = editable && *mode == MatrixMode::Frequency;
+    let sense = if can_edit {
+        egui::Sense::click_and_drag()
+    } else {
+        egui::Sense::hover()
+    };
 
-    egui::Frame::none()
-        .fill(egui::Color32::WHITE)
-        .inner_margin(egui::Margin::same(1.0))
-        .show(ui, |ui| {
-            egui::Grid::new(format!("range_matrix_{title}"))
-                .spacing(egui::vec2(1.0, 1.0))
-                .min_col_width(CELL_W)
-                .show(ui, |ui| {
-                    for row in 0..13_u8 {
-                        for col in 0..13_u8 {
-                            let idx = matrix_combo_index(row, col) as usize;
-                            let label = combo_label(matrix_combo_index(row, col));
+    for row in 0..13_u8 {
+        for col in 0..13_u8 {
+            let idx = matrix_combo_index(row, col) as usize;
+            let label = combo_label(matrix_combo_index(row, col));
+            let rect = cell_rect(grid_rect, row, col, cell_w, cell_h);
+            let id = ui.id().with(("range_cell", row, col));
+            let response = ui.interact(rect, id, sense);
 
-                            let sense = if can_edit {
-                                egui::Sense::click_and_drag()
-                            } else {
-                                egui::Sense::hover()
-                            };
-                            let (rect, response) =
-                                ui.allocate_exact_size(egui::vec2(CELL_W, CELL_H), sense);
-
-                            if can_edit {
-                                if response.clicked() || response.drag_started() {
-                                    let next = if range[idx] > 0.5 { 0.0 } else { 1.0 };
-                                    ui.memory_mut(|mem| mem.data.insert_temp(paint_id, next));
-                                    if (range[idx] - next).abs() > 1e-12 {
-                                        range[idx] = next;
-                                        changed = true;
-                                    }
-                                } else if response.hovered()
-                                    && ui.input(|i| i.pointer.primary_down())
-                                {
-                                    if let Some(next) =
-                                        ui.memory(|mem| mem.data.get_temp::<f64>(paint_id))
-                                    {
-                                        if (range[idx] - next).abs() > 1e-12 {
-                                            range[idx] = next;
-                                            changed = true;
-                                        }
-                                    }
-                                }
-                            }
-
-                            let (bg, value) = match *mode {
-                                MatrixMode::Frequency => {
-                                    let freq = range[idx].clamp(0.0, 1.0);
-                                    let color = lerp_color(
-                                        HRC_WHITE,
-                                        if is_raise { HRC_PURPLE } else { HRC_CALL },
-                                        freq as f32,
-                                    );
-                                    (color, format!("{:.0}", freq * 100.0))
-                                }
-                                MatrixMode::Ev => {
-                                    let ev = hand_evs.map(|evs| evs[idx]).unwrap_or(0.0);
-                                    (ev_color(ev), format!("{ev:+.2}"))
-                                }
-                            };
-
-                            ui.painter().rect_filled(rect, 0.0, bg);
-                            ui.painter().text(
-                                egui::pos2(rect.center().x, rect.top() + 11.0),
-                                egui::Align2::CENTER_CENTER,
-                                label,
-                                egui::FontId::proportional(11.0),
-                                TEXT_DARK,
-                            );
-                            ui.painter().text(
-                                egui::pos2(rect.center().x, rect.bottom() - 10.0),
-                                egui::Align2::CENTER_CENTER,
-                                value,
-                                egui::FontId::proportional(9.0),
-                                TEXT_DARK,
-                            );
-                        }
-                        ui.end_row();
+            if can_edit {
+                if response.clicked() || response.drag_started() {
+                    let next = if range[idx] > 0.5 { 0.0 } else { 1.0 };
+                    ui.memory_mut(|mem| mem.data.insert_temp(paint_id, next));
+                    if (range[idx] - next).abs() > 1e-12 {
+                        range[idx] = next;
+                        changed = true;
                     }
-                });
-        });
+                } else if response.hovered() && ui.input(|i| i.pointer.primary_down()) {
+                    if let Some(next) = ui.memory(|mem| mem.data.get_temp::<f64>(paint_id)) {
+                        if (range[idx] - next).abs() > 1e-12 {
+                            range[idx] = next;
+                            changed = true;
+                        }
+                    }
+                }
+            }
+
+            let (bg, value) = match *mode {
+                MatrixMode::Frequency => {
+                    let freq = range[idx].clamp(0.0, 1.0);
+                    let color = lerp_color(
+                        HRC_WHITE,
+                        if is_raise { HRC_PURPLE } else { HRC_CALL },
+                        freq as f32,
+                    );
+                    (color, format!("{:.0}", freq * 100.0))
+                }
+                MatrixMode::Ev => {
+                    let ev = hand_evs.map(|evs| evs[idx]).unwrap_or(0.0);
+                    (ev_color(ev), format!("{ev:+.2}"))
+                }
+            };
+
+            ui.painter().rect_filled(rect, 0.0, bg);
+            ui.painter().text(
+                egui::pos2(rect.center().x, rect.top() + cell_h * 0.32),
+                egui::Align2::CENTER_CENTER,
+                label,
+                egui::FontId::proportional(label_font),
+                TEXT_DARK,
+            );
+            ui.painter().text(
+                egui::pos2(rect.center().x, rect.bottom() - cell_h * 0.28),
+                egui::Align2::CENTER_CENTER,
+                value,
+                egui::FontId::proportional(value_font),
+                TEXT_DARK,
+            );
+        }
+    }
 
     ui.add_space(2.0);
-    action_bar_ui(ui, share, is_raise, grid_width);
+    action_bar_ui(ui, share, is_raise, grid_w);
     changed
+}
+
+fn cell_rect(grid: egui::Rect, row: u8, col: u8, cell_w: f32, cell_h: f32) -> egui::Rect {
+    let x = grid.left() + col as f32 * (cell_w + GRID_GAP);
+    let y = grid.top() + row as f32 * (cell_h + GRID_GAP);
+    egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(cell_w, cell_h))
 }
 
 fn action_bar_ui(ui: &mut egui::Ui, share: f64, is_raise: bool, width: f32) {
     let play = share.clamp(0.0, 1.0) as f32;
     let fold = 1.0 - play;
-    let height = 18.0;
+    let height = BAR_H;
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
     let fold_w = rect.width() * fold;
     let play_w = rect.width() * play;

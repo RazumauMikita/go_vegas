@@ -20,6 +20,7 @@ const TREE_BG: Color32 = Color32::WHITE;
 const TREE_TEXT: Color32 = Color32::from_rgb(32, 32, 32);
 const DOT_RAISE: Color32 = Color32::from_rgb(76, 175, 80);
 const DOT_CALL: Color32 = Color32::from_rgb(196, 80, 70);
+const DOT_CALL_NESTED: Color32 = Color32::from_rgb(66, 133, 244);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
@@ -56,7 +57,7 @@ impl TreeNode {
 }
 
 pub fn build_strategy_tree(output: &SolverOutput, button_index: usize) -> Vec<TreeNode> {
-    if let Some(ranges) = output.nine_max.as_ref() {
+    let mut tree = if let Some(ranges) = output.nine_max.as_ref() {
         build_9max_tree(ranges, output, button_index)
     } else if let Some(ranges) = output.eight_max.as_ref() {
         build_8max_tree(ranges, output, button_index)
@@ -73,6 +74,22 @@ pub fn build_strategy_tree(output: &SolverOutput, button_index: usize) -> Vec<Tr
         build_3max_tree(ranges, hand_evs)
     } else {
         build_hu_tree(output)
+    };
+    expand_one_level(&mut tree);
+    tree
+}
+
+fn expand_one_level(tree: &mut [TreeNode]) {
+    for node in tree {
+        node.expanded = !node.children.is_empty();
+        collapse_all(&mut node.children);
+    }
+}
+
+fn collapse_all(tree: &mut [TreeNode]) {
+    for node in tree {
+        node.expanded = false;
+        collapse_all(&mut node.children);
     }
 }
 
@@ -100,6 +117,7 @@ pub fn node_at_path_mut<'a>(tree: &'a mut [TreeNode], path: &[usize]) -> Option<
 
 pub fn draw_strategy_tree_header(ui: &mut Ui) {
     let width = ui.available_width();
+    let cols = tree_columns(width);
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, ROW_H), Sense::hover());
     ui.painter().rect_filled(rect, 0.0, TREE_HEADER);
     let font = FontId::proportional(13.0);
@@ -107,7 +125,7 @@ pub fn draw_strategy_tree_header(ui: &mut Ui) {
     paint_col_text(ui, rect.left() + 8.0, y, "Action", &font, Color32::WHITE, None);
     paint_col_text(
         ui,
-        rect.left() + COL_ACTION_W,
+        rect.left() + cols.action,
         y,
         "Amt [BB]",
         &font,
@@ -116,7 +134,7 @@ pub fn draw_strategy_tree_header(ui: &mut Ui) {
     );
     paint_col_text(
         ui,
-        rect.left() + COL_ACTION_W + COL_AMT_W,
+        rect.left() + cols.action + cols.amt,
         y,
         "Player",
         &font,
@@ -125,7 +143,7 @@ pub fn draw_strategy_tree_header(ui: &mut Ui) {
     );
     paint_col_text(
         ui,
-        rect.left() + COL_ACTION_W + COL_AMT_W + COL_PLAYER_W,
+        rect.left() + cols.action + cols.amt + cols.player,
         y,
         "Range",
         &font,
@@ -143,6 +161,7 @@ pub fn draw_strategy_tree(
     stacks_bb: &HashMap<String, f64>,
     path_prefix: &[usize],
     depth: usize,
+    in_call_line: bool,
 ) {
     for (index, node) in tree.iter_mut().enumerate() {
         let current_path: NodePath = path_prefix
@@ -162,6 +181,7 @@ pub fn draw_strategy_tree(
         };
 
         let width = ui.available_width();
+        let cols = tree_columns(width);
         let (rect, response) = ui.allocate_exact_size(egui::vec2(width, ROW_H), Sense::click());
         let hovered = response.hovered();
         let bg = if is_selected {
@@ -204,11 +224,16 @@ pub fn draw_strategy_tree(
             }
         }
 
+        let is_call = matches!(node.action, Action::Call | Action::CallSpecial);
         let dot_x = action_left + if has_children { 22.0 } else { 18.0 };
-        let dot_color = match node.action {
-            Action::Raise => DOT_RAISE,
-            Action::Call | Action::CallSpecial => DOT_CALL,
+        let dot_color = if in_call_line {
+            DOT_CALL_NESTED
+        } else if is_call {
+            DOT_CALL
+        } else {
+            DOT_RAISE
         };
+        let in_call_line = in_call_line || is_call;
         ui.painter()
             .circle_filled(Pos2::new(dot_x, rect.center().y), 4.5, dot_color);
         ui.painter().text(
@@ -222,7 +247,7 @@ pub fn draw_strategy_tree(
         let font = FontId::proportional(12.0);
         paint_col_text(
             ui,
-            rect.left() + COL_ACTION_W,
+            rect.left() + cols.action,
             rect.center().y,
             &format!("{amount:.2}"),
             &font,
@@ -231,7 +256,7 @@ pub fn draw_strategy_tree(
         );
         paint_col_text(
             ui,
-            rect.left() + COL_ACTION_W + COL_AMT_W,
+            rect.left() + cols.action + cols.amt,
             rect.center().y,
             node.player(),
             &font,
@@ -240,7 +265,7 @@ pub fn draw_strategy_tree(
         );
         paint_col_text(
             ui,
-            rect.left() + COL_ACTION_W + COL_AMT_W + COL_PLAYER_W,
+            rect.left() + cols.action + cols.amt + cols.player,
             rect.center().y,
             &range_text,
             &font,
@@ -265,9 +290,25 @@ pub fn draw_strategy_tree(
                 stacks_bb,
                 &current_path,
                 depth + 1,
+                in_call_line,
             );
         }
     }
+}
+
+fn tree_columns(width: f32) -> TreeColumns {
+    let scale = (width / 420.0).clamp(0.62, 1.0);
+    TreeColumns {
+        action: COL_ACTION_W * scale,
+        amt: COL_AMT_W * scale,
+        player: COL_PLAYER_W * scale,
+    }
+}
+
+struct TreeColumns {
+    action: f32,
+    amt: f32,
+    player: f32,
 }
 
 fn paint_col_text(
@@ -319,7 +360,7 @@ fn make_node(
         range,
         ev_range,
         children,
-        expanded: true,
+        expanded: false,
     }
 }
 
@@ -1971,3 +2012,39 @@ fn build_hu_tree(output: &SolverOutput) -> Vec<TreeNode> {
         )],
     )]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expand_one_level_keeps_deeper_nodes_collapsed() {
+        let mut tree = vec![make_node(
+            0,
+            "BTN push",
+            Action::Raise,
+            [0.0; 169],
+            None,
+            vec![make_node(
+                1,
+                "SB call",
+                Action::Call,
+                [0.0; 169],
+                None,
+                vec![make_node(
+                    2,
+                    "BB call",
+                    Action::Call,
+                    [0.0; 169],
+                    None,
+                    vec![],
+                )],
+            )],
+        )];
+        expand_one_level(&mut tree);
+        assert!(tree[0].expanded);
+        assert!(!tree[0].children[0].expanded);
+        assert!(!tree[0].children[0].children[0].expanded);
+    }
+}
+

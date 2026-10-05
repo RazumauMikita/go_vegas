@@ -11,12 +11,14 @@ use app::PokerApp;
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1400.0, 900.0])
+            .with_inner_size([1280.0, 800.0])
+            .with_min_inner_size([640.0, 480.0])
             .with_title("Poker Solver")
             .with_icon(
                 eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png"))
                     .expect("icon"),
             ),
+        centered: true,
         ..Default::default()
     };
 

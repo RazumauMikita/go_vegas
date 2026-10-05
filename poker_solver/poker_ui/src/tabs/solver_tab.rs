@@ -46,6 +46,13 @@ struct RangeEditor {
 const CACHE_BYTES: &[u8] = include_bytes!("../../assets/equity_cache.bin");
 
 pub struct SolverTab {
+    hands: Vec<SolverHand>,
+    active: usize,
+    next_hand_id: u64,
+}
+
+struct SolverHand {
+    id: u64,
     player_count: usize,
     stack_chips: Vec<String>,
     prize_percents: Vec<String>,
@@ -70,6 +77,143 @@ pub struct SolverTab {
 impl Default for SolverTab {
     fn default() -> Self {
         Self {
+            hands: vec![SolverHand::new(1)],
+            active: 0,
+            next_hand_id: 2,
+        }
+    }
+}
+
+impl Default for SolverHand {
+    fn default() -> Self {
+        Self::new(1)
+    }
+}
+
+impl SolverTab {
+    pub fn ui(&mut self, ctx: &Context) {
+        egui::TopBottomPanel::top("solver_hand_tabs")
+            .resizable(false)
+            .frame(
+                egui::Frame::none()
+                    .fill(ctx.style().visuals.extreme_bg_color)
+                    .inner_margin(egui::Margin::symmetric(8.0, 4.0)),
+            )
+            .show(ctx, |ui| {
+                self.draw_hand_tabs(ui);
+            });
+
+        if let Some(hand) = self.hands.get_mut(self.active) {
+            hand.ui(ctx);
+        }
+    }
+
+    pub fn poll(&mut self, ctx: &Context) {
+        let mut computing = false;
+        for hand in &mut self.hands {
+            hand.poll(ctx);
+            computing |= hand.computing;
+        }
+        if computing {
+            ctx.request_repaint();
+        }
+    }
+
+    fn draw_hand_tabs(&mut self, ui: &mut Ui) {
+        let mut select = None;
+        let mut close = None;
+        let mut add = false;
+        let closable = self.hands.len() > 1;
+
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(4.0, 0.0);
+            ui.set_height(28.0);
+            let tabs_width = (ui.available_width() - 32.0).max(80.0);
+
+            egui::ScrollArea::horizontal()
+                .id_salt("solver_hand_tab_scroll")
+                .max_width(tabs_width)
+                .auto_shrink([true, true])
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(4.0, 0.0);
+                        ui.set_height(28.0);
+                        for (index, hand) in self.hands.iter().enumerate() {
+                            let title = hand.tab_title();
+                            let (clicked, closed, middle) = draw_hand_tab(
+                                ui,
+                                &title,
+                                index == self.active,
+                                hand.computing,
+                                closable,
+                            );
+                            if closed || (middle && closable) {
+                                close = Some(index);
+                            } else if clicked {
+                                select = Some(index);
+                            }
+                        }
+                    });
+                });
+
+            let add_response = ui.add_sized(
+                [24.0, 22.0],
+                egui::Button::new(RichText::new("+").size(18.0)),
+            );
+            if add_response.on_hover_text("Новая раздача").clicked() {
+                add = true;
+            }
+        });
+
+        if let Some(index) = select {
+            self.active = index;
+        }
+        if let Some(index) = close {
+            self.close_hand(index);
+        }
+        if add {
+            self.add_hand();
+        }
+    }
+
+    fn add_hand(&mut self) {
+        let id = self.next_hand_id;
+        self.next_hand_id += 1;
+        let cache = self
+            .hands
+            .first()
+            .map(|hand| hand.equity_cache.clone())
+            .unwrap_or_else(|| {
+                EquityCache::from_bytes(CACHE_BYTES).expect("embedded cache corrupted")
+            });
+        self.hands.push(SolverHand::with_cache(id, cache));
+        self.active = self.hands.len() - 1;
+    }
+
+    fn close_hand(&mut self, index: usize) {
+        if self.hands.len() <= 1 || index >= self.hands.len() {
+            return;
+        }
+        self.hands.remove(index);
+        if self.active >= self.hands.len() {
+            self.active = self.hands.len() - 1;
+        } else if index < self.active {
+            self.active -= 1;
+        }
+    }
+}
+
+impl SolverHand {
+    fn new(id: u64) -> Self {
+        Self::with_cache(
+            id,
+            EquityCache::from_bytes(CACHE_BYTES).expect("embedded cache corrupted"),
+        )
+    }
+
+    fn with_cache(id: u64, equity_cache: EquityCache) -> Self {
+        Self {
+            id,
             player_count: 3,
             stack_chips: vec!["1000".to_string(), "1000".to_string(), "1000".to_string()],
             prize_percents: vec!["50".to_string(), "30".to_string(), "20".to_string()],
@@ -79,7 +223,7 @@ impl Default for SolverTab {
             max_iterations: "200".to_string(),
             tolerance: "0.001".to_string(),
             algorithm: Algorithm::FictitiousPlay,
-            equity_cache: EquityCache::from_bytes(CACHE_BYTES).expect("embedded cache corrupted"),
+            equity_cache,
             matrix_modes: HashMap::new(),
             error: None,
             worker_rx: None,
@@ -91,10 +235,12 @@ impl Default for SolverTab {
             range_editor: None,
         }
     }
-}
 
-impl SolverTab {
-    pub fn ui(&mut self, ctx: &Context) {
+    fn tab_title(&self) -> String {
+        format!("#{}", self.id)
+    }
+
+    fn ui(&mut self, ctx: &Context) {
         egui::TopBottomPanel::top("solver_input_panel")
             .resizable(false)
             .show(ctx, |ui| {
@@ -103,13 +249,22 @@ impl SolverTab {
                     .default_open(false)
                     .show(ui, |ui| {
                         ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
-                        self.draw_settings(ui);
+                        let max_h = (ctx.screen_rect().height() * 0.38).max(120.0);
+                        egui::ScrollArea::vertical()
+                            .max_height(max_h)
+                            .auto_shrink([false, true])
+                            .show(ui, |ui| {
+                                self.draw_settings(ui);
+                            });
                     });
                 self.draw_action_row(ui, ctx);
             });
 
         if self.result.is_some() && !self.tree.is_empty() {
-            let (default_width, min_width, max_width) = (560.0, 420.0, 820.0);
+            let window_width = ctx.screen_rect().width();
+            let min_width = 200.0;
+            let max_width = (window_width - 320.0).max(min_width + 80.0);
+            let default_width = (window_width * 0.42).clamp(min_width, max_width);
             egui::SidePanel::left("strategy_tree_panel")
                 .resizable(true)
                 .default_width(default_width)
@@ -138,33 +293,49 @@ impl SolverTab {
                                 &stacks_bb,
                                 &[],
                                 0,
+                                false,
                             );
                         });
                     if let Some(path) = editor_path {
                         self.open_range_editor(path);
                     }
                 });
+
+            if let Some(result) = self.result.clone() {
+                let max_outline = (ctx.available_rect().height() * 0.42).max(90.0);
+                egui::TopBottomPanel::bottom("solver_outline_panel")
+                    .resizable(true)
+                    .default_height(148.0)
+                    .min_height(72.0)
+                    .max_height(max_outline)
+                    .show(ctx, |ui| {
+                        ui.heading("Outline");
+                        egui::ScrollArea::both()
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                self.show_outline_table(ui, &result);
+                            });
+                    });
+            }
         }
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            if let Some(result) = self.result.clone() {
-                egui::ScrollArea::both()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        self.draw_result_panels(ui, &result);
+        egui::CentralPanel::default()
+            .frame(egui::Frame::central_panel(&ctx.style()).inner_margin(egui::Margin::same(6.0)))
+            .show(ctx, |ui| {
+                if let Some(result) = self.result.clone() {
+                    self.draw_result_panels(ui, &result);
+                } else {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(40.0);
+                        ui.label("Введите параметры и нажмите «Рассчитать».");
                     });
-            } else {
-                ui.vertical_centered(|ui| {
-                    ui.add_space(40.0);
-                    ui.label("Введите параметры и нажмите «Рассчитать».");
-                });
-            }
-        });
+                }
+            });
 
         self.draw_range_editor(ctx);
     }
 
-    pub fn poll(&mut self, ctx: &Context) {
+    fn poll(&mut self, ctx: &Context) {
         if let Some(rx) = &self.worker_rx {
             match rx.try_recv() {
                 Ok(SolverWorkerMessage::Done(result)) => {
@@ -240,7 +411,7 @@ impl SolverTab {
     }
 
     fn draw_settings(&mut self, ui: &mut Ui) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("Игроков:");
             if ui.selectable_label(self.player_count == 2, "2").clicked() {
                 self.set_player_count(2);
@@ -275,85 +446,43 @@ impl SolverTab {
             .unwrap_or(100.0)
             .max(1e-9);
 
-        ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.label("Стеки");
-                egui::Grid::new("stack_input_table")
-                    .num_columns(3)
-                    .striped(true)
-                    .spacing(egui::vec2(6.0, 4.0))
-                    .show(ui, |ui| {
-                        ui.label("Position");
-                        ui.label("Stack (chips)");
-                        ui.label("Stack (BB)");
-                        ui.end_row();
-
-                        for index in 0..self.player_count {
-                            ui.label(position_label(self.player_count, index));
-                            ui.text_edit_singleline(&mut self.stack_chips[index]);
-                            let stack_bb = self
-                                .stack_chips
-                                .get(index)
-                                .and_then(|s| s.trim().parse::<f64>().ok())
-                                .map(|stack| stack / bb)
-                                .unwrap_or(0.0);
-                            ui.label(format!("{stack_bb:.2}"));
-                            ui.end_row();
-                        }
-                    });
+        let side_by_side = ui.available_width() >= 560.0;
+        if side_by_side {
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| self.draw_stack_table(ui, bb));
+                ui.add_space(16.0);
+                ui.vertical(|ui| self.draw_prize_table(ui));
             });
+        } else {
+            self.draw_stack_table(ui, bb);
+            ui.add_space(8.0);
+            self.draw_prize_table(ui);
+        }
 
-            ui.add_space(16.0);
-
-            ui.vertical(|ui| {
-                ui.label("Призы");
-                egui::Grid::new("prize_input_table")
-                    .num_columns(2)
-                    .striped(true)
-                    .spacing(egui::vec2(6.0, 4.0))
-                    .show(ui, |ui| {
-                        ui.label("Place");
-                        ui.label("Prize %");
-                        ui.end_row();
-
-                        for index in 0..self.prize_percents.len() {
-                            ui.label(format!("{}", index + 1));
-                            ui.add(
-                                egui::TextEdit::singleline(&mut self.prize_percents[index])
-                                    .hint_text("нет"),
-                            );
-                            ui.end_row();
-                        }
-                    });
-
-                ui.horizontal(|ui| {
-                    if ui.button("+").clicked() && self.prize_percents.len() < self.player_count {
-                        self.prize_percents.push("0".to_string());
-                    }
-                    if ui.button("−").clicked() && self.prize_percents.len() > 1 {
-                        self.prize_percents.pop();
-                    }
-                });
+        ui.horizontal_wrapped(|ui| {
+            ui.horizontal(|ui| {
+                compact_param_field(ui, "SB:", &mut self.small_blind, 70.0);
+            });
+            ui.horizontal(|ui| {
+                compact_param_field(ui, "BB:", &mut self.big_blind, 70.0);
+            });
+            ui.horizontal(|ui| {
+                compact_param_field(ui, "Ante:", &mut self.ante, 70.0);
+            });
+            ui.horizontal(|ui| {
+                compact_param_field(ui, "Iter:", &mut self.max_iterations, 70.0);
+            });
+            ui.horizontal(|ui| {
+                compact_param_field(ui, "Tol:", &mut self.tolerance, 80.0);
             });
         });
 
-        ui.horizontal(|ui| {
-            compact_param_field(ui, "SB:", &mut self.small_blind, 70.0);
-            ui.add_space(8.0);
-            compact_param_field(ui, "BB:", &mut self.big_blind, 70.0);
-            ui.add_space(8.0);
-            compact_param_field(ui, "Ante:", &mut self.ante, 70.0);
-            ui.add_space(8.0);
-            compact_param_field(ui, "Iter:", &mut self.max_iterations, 70.0);
-            ui.add_space(8.0);
-            compact_param_field(ui, "Tol:", &mut self.tolerance, 80.0);
-        });
-
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("Algorithm:");
-            egui::ComboBox::from_id_salt("solver_algorithm")
+            let combo_width = (ui.available_width() - 8.0).clamp(160.0, 220.0);
+            egui::ComboBox::from_id_salt(("solver_algorithm", self.id))
                 .selected_text(algorithm_label(self.algorithm))
-                .width(220.0)
+                .width(combo_width)
                 .show_ui(ui, |ui| {
                     ui.selectable_value(
                         &mut self.algorithm,
@@ -434,8 +563,65 @@ impl SolverTab {
         }
     }
 
-    fn draw_action_row(&mut self, ui: &mut Ui, ctx: &Context) {
+    fn draw_stack_table(&mut self, ui: &mut Ui, bb: f64) {
+        ui.label("Стеки");
+        egui::Grid::new("stack_input_table")
+            .num_columns(3)
+            .striped(true)
+            .spacing(egui::vec2(6.0, 4.0))
+            .show(ui, |ui| {
+                ui.label("Position");
+                ui.label("Stack (chips)");
+                ui.label("Stack (BB)");
+                ui.end_row();
+
+                for index in 0..self.player_count {
+                    ui.label(position_label(self.player_count, index));
+                    ui.text_edit_singleline(&mut self.stack_chips[index]);
+                    let stack_bb = self
+                        .stack_chips
+                        .get(index)
+                        .and_then(|s| s.trim().parse::<f64>().ok())
+                        .map(|stack| stack / bb)
+                        .unwrap_or(0.0);
+                    ui.label(format!("{stack_bb:.2}"));
+                    ui.end_row();
+                }
+            });
+    }
+
+    fn draw_prize_table(&mut self, ui: &mut Ui) {
+        ui.label("Призы");
+        egui::Grid::new("prize_input_table")
+            .num_columns(2)
+            .striped(true)
+            .spacing(egui::vec2(6.0, 4.0))
+            .show(ui, |ui| {
+                ui.label("Place");
+                ui.label("Prize %");
+                ui.end_row();
+
+                for index in 0..self.prize_percents.len() {
+                    ui.label(format!("{}", index + 1));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.prize_percents[index]).hint_text("нет"),
+                    );
+                    ui.end_row();
+                }
+            });
+
         ui.horizontal(|ui| {
+            if ui.button("+").clicked() && self.prize_percents.len() < self.player_count {
+                self.prize_percents.push("0".to_string());
+            }
+            if ui.button("−").clicked() && self.prize_percents.len() > 1 {
+                self.prize_percents.pop();
+            }
+        });
+    }
+
+    fn draw_action_row(&mut self, ui: &mut Ui, ctx: &Context) {
+        ui.horizontal_wrapped(|ui| {
             if ui.button("Вставить раздачу").clicked() {
                 self.import_hand_from_clipboard();
             }
@@ -543,6 +729,7 @@ impl SolverTab {
                     }
                 });
 
+                ui.add_space(4.0);
                 {
                     let mode = self
                         .matrix_modes
@@ -560,13 +747,6 @@ impl SolverTab {
                         );
                     }
                 }
-
-                ui.add_space(12.0);
-                egui::CollapsingHeader::new("Outline")
-                    .default_open(false)
-                    .show(ui, |ui| {
-                        self.show_outline_table(ui, result);
-                    });
                 return;
             }
         }
@@ -686,11 +866,21 @@ impl SolverTab {
             .map(|editor| format!("Диапазон: {}", editor.label))
             .unwrap_or_default();
 
+        let screen = ctx.screen_rect();
+        let max_size = screen.size() * 0.94;
+        let default_size = egui::vec2(
+            (max_size.x * 0.72).clamp(560.0, 980.0),
+            (max_size.y * 0.88).clamp(520.0, 920.0),
+        );
         egui::Window::new(title)
-            .id(egui::Id::new("solver_range_editor"))
+            .id(egui::Id::new(("solver_range_editor", self.id)))
             .open(&mut open)
             .collapsible(false)
-            .resizable(false)
+            .resizable(true)
+            .constrain(true)
+            .default_size(default_size)
+            .min_size([480.0, 420.0])
+            .max_size(max_size)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
                 let Some(editor) = self.range_editor.as_mut() else {
@@ -700,7 +890,7 @@ impl SolverTab {
                 ui.horizontal(|ui| {
                     ui.label("Range");
                     let mut pct = editor.slider_pct;
-                    let width = (ui.available_width() - 8.0).max(180.0);
+                    let width = (ui.available_width() - 8.0).max(120.0);
                     let slider = ui.add_sized(
                         [width, 18.0],
                         egui::Slider::new(&mut pct, 0.0..=100.0)
@@ -719,21 +909,26 @@ impl SolverTab {
                     .small()
                     .weak(),
                 );
-                ui.add_space(8.0);
+                ui.add_space(6.0);
 
-                if range_matrix_ui(
-                    ui,
-                    &mut editor.range,
-                    editor.ev_range.as_ref(),
-                    &mut editor.matrix_mode,
-                    "",
-                    true,
-                    editor.is_raise,
-                ) {
-                    editor.slider_pct = combo_share(&editor.range) * 100.0;
-                }
+                let buttons_h = 32.0;
+                let matrix_h = (ui.available_height() - buttons_h).max(240.0);
+                let matrix_w = ui.available_width();
+                ui.allocate_ui(egui::vec2(matrix_w, matrix_h), |ui| {
+                    if range_matrix_ui(
+                        ui,
+                        &mut editor.range,
+                        editor.ev_range.as_ref(),
+                        &mut editor.matrix_mode,
+                        "",
+                        true,
+                        editor.is_raise,
+                    ) {
+                        editor.slider_pct = combo_share(&editor.range) * 100.0;
+                    }
+                });
 
-                ui.add_space(8.0);
+                ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut editor.lock, "Lock");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -883,9 +1078,11 @@ impl SolverTab {
         let show_eq_real = pool_size < 1.0 - 1e-6;
         let columns = if show_eq_real { 7 } else { 6 };
 
+        let col_w = (ui.available_width() / columns as f32).max(56.0);
         egui::Grid::new("solver_outline_table")
             .num_columns(columns)
             .striped(true)
+            .min_col_width(col_w)
             .show(ui, |ui| {
                 ui.label("Pos");
                 ui.label("Stack");
@@ -966,6 +1163,82 @@ fn format_stack(value: f64) -> String {
     } else {
         format!("{value}")
     }
+}
+
+fn draw_hand_tab(
+    ui: &mut Ui,
+    title: &str,
+    selected: bool,
+    computing: bool,
+    closable: bool,
+) -> (bool, bool, bool) {
+    let mut close_clicked = false;
+    let visuals = ui.visuals().clone();
+    let fill = if selected {
+        visuals.panel_fill
+    } else {
+        visuals.extreme_bg_color
+    };
+    let text_color = if selected {
+        visuals.strong_text_color()
+    } else {
+        visuals.weak_text_color()
+    };
+    let rounding = egui::Rounding {
+        nw: 5.0,
+        ne: 5.0,
+        sw: 0.0,
+        se: 0.0,
+    };
+
+    let inner = egui::Frame::none()
+        .fill(fill)
+        .rounding(rounding)
+        .inner_margin(egui::Margin::symmetric(8.0, 4.0))
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(4.0, 0.0);
+            ui.horizontal(|ui| {
+                ui.set_height(20.0);
+                if computing {
+                    ui.add(egui::Spinner::new().size(11.0));
+                } else {
+                    draw_hand_icon(ui, text_color, fill);
+                }
+                ui.add(egui::Label::new(RichText::new(title).color(text_color)).selectable(false));
+                if closable {
+                    let close = ui.add(
+                        egui::Button::new(RichText::new("×").size(14.0).color(text_color))
+                            .frame(false)
+                            .min_size(egui::vec2(14.0, 14.0)),
+                    );
+                    if close.on_hover_text("Закрыть").clicked() {
+                        close_clicked = true;
+                    }
+                }
+            });
+        });
+
+    let response = inner
+        .response
+        .interact(egui::Sense::click())
+        .on_hover_text(format!("Раздача {title}"));
+    (
+        response.clicked() && !close_clicked,
+        close_clicked,
+        response.middle_clicked(),
+    )
+}
+
+fn draw_hand_icon(ui: &mut Ui, color: egui::Color32, fill: egui::Color32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(13.0, 14.0), egui::Sense::hover());
+    let painter = ui.painter();
+    let rounding = 1.5;
+    let stroke = egui::Stroke::new(1.15_f32, color);
+    let back = egui::Rect::from_min_size(rect.min + egui::vec2(0.0, 0.5), egui::vec2(8.0, 11.0));
+    let front = egui::Rect::from_min_size(rect.min + egui::vec2(3.5, 2.0), egui::vec2(8.0, 11.0));
+    painter.rect_stroke(back, rounding, stroke);
+    painter.rect_filled(front, rounding, fill);
+    painter.rect_stroke(front, rounding, stroke);
 }
 
 fn compact_param_field(ui: &mut Ui, label: &str, value: &mut String, width: f32) {
@@ -1169,7 +1442,7 @@ mod tests {
 
     #[test]
     fn parse_solver_input_defaults() {
-        let tab = SolverTab::default();
+        let tab = SolverHand::default();
         let input = tab.parse_input().expect("default input should parse");
         assert_eq!(input.stacks, vec![1000.0, 1000.0, 1000.0]);
         assert_eq!(input.payouts, vec![0.5, 0.3, 0.2]);
@@ -1219,7 +1492,7 @@ mod tests {
 
     #[test]
     fn parse_solver_input_blank_places_have_no_prize() {
-        let mut tab = SolverTab::default();
+        let mut tab = SolverHand::default();
         tab.set_player_count(4);
         tab.prize_percents = vec![
             "40".to_string(),
@@ -1251,7 +1524,7 @@ mod tests {
 
     #[test]
     fn parse_solver_input_allows_partial_payouts() {
-        let mut tab = SolverTab::default();
+        let mut tab = SolverHand::default();
         tab.player_count = 2;
         tab.stack_chips = vec!["1000".to_string(), "1000".to_string()];
         tab.prize_percents = vec!["50".to_string(), "30".to_string()];
@@ -1261,7 +1534,7 @@ mod tests {
 
     #[test]
     fn parse_solver_input_rejects_payouts_over_one() {
-        let mut tab = SolverTab::default();
+        let mut tab = SolverHand::default();
         tab.prize_percents = vec!["60".to_string(), "50".to_string()];
         let error = tab.parse_input().expect_err("overfull payouts should fail");
         assert!(error.contains("не может превышать 1.0"));
@@ -1269,7 +1542,7 @@ mod tests {
 
     #[test]
     fn outline_range_share_for_btn() {
-        let tab = SolverTab::default();
+        let tab = SolverHand::default();
         let input = tab.parse_input().expect("parse");
         let cache = EquityCache::from_bytes(CACHE_BYTES).expect("embedded cache");
         let output = solve(&input, &cache);
@@ -1280,4 +1553,50 @@ mod tests {
             shares[0] * 100.0
         );
     }
+
+    #[test]
+    fn solver_starts_with_one_hand_tab() {
+        let tab = SolverTab::default();
+        assert_eq!(tab.hands.len(), 1);
+        assert_eq!(tab.active, 0);
+        assert_eq!(tab.hands[0].tab_title(), "#1");
+    }
+
+    #[test]
+    fn add_hand_opens_empty_tab() {
+        let mut tab = SolverTab::default();
+        tab.add_hand();
+        assert_eq!(tab.hands.len(), 2);
+        assert_eq!(tab.active, 1);
+        assert_eq!(tab.hands[1].tab_title(), "#2");
+        assert!(tab.hands[1].result.is_none());
+        assert!(!tab.hands[1].computing);
+    }
+
+    #[test]
+    fn close_last_hand_is_noop() {
+        let mut tab = SolverTab::default();
+        tab.close_hand(0);
+        assert_eq!(tab.hands.len(), 1);
+        assert_eq!(tab.active, 0);
+    }
+
+    #[test]
+    fn close_hand_selects_neighbor() {
+        let mut tab = SolverTab::default();
+        tab.add_hand();
+        tab.add_hand();
+        assert_eq!(tab.active, 2);
+        tab.close_hand(2);
+        assert_eq!(tab.hands.len(), 2);
+        assert_eq!(tab.active, 1);
+
+        tab.active = 0;
+        let remaining_id = tab.hands[1].id;
+        tab.close_hand(0);
+        assert_eq!(tab.hands.len(), 1);
+        assert_eq!(tab.active, 0);
+        assert_eq!(tab.hands[0].id, remaining_id);
+    }
+
 }
