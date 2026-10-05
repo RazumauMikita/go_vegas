@@ -9,9 +9,10 @@ use poker_core::{
     SolverInput, SolverOutput,
 };
 
+use crate::tabs::import_tab::ImportTab;
 use crate::tabs::strategy_tree::{
-    build_strategy_tree, draw_strategy_tree, draw_strategy_tree_header, node_at_path,
-    node_at_path_mut, Action, NodePath, TreeNode,
+    build_strategy_tree, draw_strategy_tree, draw_strategy_tree_header, find_hero_decision_path,
+    node_at_path, node_at_path_mut, Action, NodePath, TreeNode,
 };
 use crate::util::format_duration;
 use crate::widgets::{
@@ -45,12 +46,30 @@ struct RangeEditor {
 
 const CACHE_BYTES: &[u8] = include_bytes!("../../assets/equity_cache.bin");
 
+#[derive(Clone)]
+pub struct OpenHandRequest {
+    pub player_count: usize,
+    pub stacks: Vec<f64>,
+    pub prize_percents: Vec<String>,
+    pub small_blind: f64,
+    pub big_blind: f64,
+    pub ante: f64,
+    pub actions_before: Vec<(String, bool)>,
+    pub hero_label: String,
+}
+
 pub struct SolverTab {
-    hands: Vec<SolverHand>,
+    tabs: Vec<WorkspaceTab>,
     active: usize,
     next_hand_id: u64,
+    next_import_id: u64,
     settings_open: bool,
     settings_anim: f32,
+}
+
+enum WorkspaceTab {
+    Hand(SolverHand),
+    Import(ImportTab),
 }
 
 struct SolverHand {
@@ -73,14 +92,16 @@ struct SolverHand {
     selected_path: Option<NodePath>,
     locked_ranges: HashMap<usize, [f64; 169]>,
     range_editor: Option<RangeEditor>,
+    pending_spot: Option<(Vec<(String, bool)>, String)>,
 }
 
 impl Default for SolverTab {
     fn default() -> Self {
         Self {
-            hands: vec![SolverHand::new(1)],
+            tabs: vec![WorkspaceTab::Hand(SolverHand::new(1))],
             active: 0,
             next_hand_id: 2,
+            next_import_id: 1,
             settings_open: true,
             settings_anim: 1.0,
         }
@@ -106,19 +127,59 @@ impl SolverTab {
                 self.draw_hand_tabs(ui);
             });
 
-        if let Some(hand) = self.hands.get_mut(self.active) {
-            hand.ui(ctx, &mut self.settings_open, &mut self.settings_anim);
+        match self.tabs.get_mut(self.active) {
+            Some(WorkspaceTab::Hand(hand)) => {
+                hand.ui(ctx, &mut self.settings_open, &mut self.settings_anim);
+            }
+            Some(WorkspaceTab::Import(import)) => import.ui(ctx),
+            None => {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(48.0);
+                        ui.label("Нет открытых вкладок.");
+                        ui.horizontal(|ui| {
+                            if ui.button("Новая раздача").clicked() {
+                                self.add_hand();
+                            }
+                            if ui.button("Загрузить файлы").clicked() {
+                                self.open_import_files();
+                            }
+                        });
+                    });
+                });
+            }
         }
     }
 
     pub fn poll(&mut self, ctx: &Context) {
         let mut computing = false;
-        for hand in &mut self.hands {
-            hand.poll(ctx);
-            computing |= hand.computing;
+        for tab in &mut self.tabs {
+            match tab {
+                WorkspaceTab::Hand(hand) => {
+                    hand.poll(ctx);
+                    computing |= hand.computing;
+                }
+                WorkspaceTab::Import(import) => {
+                    import.poll(ctx);
+                    computing |= import.is_analyzing();
+                }
+            }
         }
         if computing {
             ctx.request_repaint();
+        }
+
+        let mut open_request = None;
+        for tab in &mut self.tabs {
+            if let WorkspaceTab::Import(import) = tab {
+                if let Some(request) = import.take_open_request() {
+                    open_request = Some(request);
+                    break;
+                }
+            }
+        }
+        if let Some(request) = open_request {
+            self.open_hand(request, ctx);
         }
     }
 
@@ -126,57 +187,49 @@ impl SolverTab {
         let mut select = None;
         let mut close = None;
         let mut add = false;
+        let mut import = false;
         let mut start_calc = false;
-        let closable = self.hands.len() > 1;
+        let active_is_hand = matches!(self.tabs.get(self.active), Some(WorkspaceTab::Hand(_)));
 
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing = egui::vec2(4.0, 0.0);
-            ui.set_height(28.0);
-            if ui
-                .selectable_label(self.settings_open, "Настройки")
-                .on_hover_text("Показать или скрыть панель настроек")
-                .clicked()
-            {
-                self.settings_open = !self.settings_open;
-            }
-
-            let has_result = self
-                .hands
-                .get(self.active)
-                .is_some_and(|hand| hand.result.is_some());
-            let computing = self
-                .hands
-                .get(self.active)
-                .is_some_and(|hand| hand.computing);
-            let calc_label = self
-                .hands
-                .get(self.active)
-                .map(SolverHand::calc_button_label)
-                .unwrap_or("Рассчитать");
-            if has_result {
+            ui.set_height(32.0);
+            if active_is_hand {
                 if ui
-                    .add_enabled(!computing, egui::Button::new(calc_label))
+                    .selectable_label(self.settings_open, "Настройки")
+                    .on_hover_text("Показать или скрыть панель настроек")
                     .clicked()
                 {
-                    start_calc = true;
+                    self.settings_open = !self.settings_open;
                 }
+
+                let has_result = self.active_hand().is_some_and(|hand| hand.result.is_some());
+                let computing = self.active_hand().is_some_and(|hand| hand.computing);
+                let calc_label = self
+                    .active_hand()
+                    .map(SolverHand::calc_button_label)
+                    .unwrap_or("Рассчитать");
+                if has_result {
+                    if ui
+                        .add_enabled(!computing, egui::Button::new(calc_label))
+                        .clicked()
+                    {
+                        start_calc = true;
+                    }
+                }
+                if computing {
+                    ui.spinner();
+                }
+                if let Some(error) = self.active_hand().and_then(|hand| hand.error.as_ref()) {
+                    ui.add(
+                        egui::Label::new(RichText::new(error).color(egui::Color32::RED).small())
+                            .truncate(),
+                    )
+                    .on_hover_text(error);
+                }
+                ui.separator();
             }
-            if computing {
-                ui.spinner();
-            }
-            if let Some(error) = self
-                .hands
-                .get(self.active)
-                .and_then(|hand| hand.error.as_ref())
-            {
-                ui.add(
-                    egui::Label::new(RichText::new(error).color(egui::Color32::RED).small())
-                        .truncate(),
-                )
-                .on_hover_text(error);
-            }
-            ui.separator();
-            let tabs_width = (ui.available_width() - 32.0).max(80.0);
+            let tabs_width = (ui.available_width() - 72.0).max(80.0);
 
             egui::ScrollArea::horizontal()
                 .id_salt("solver_hand_tab_scroll")
@@ -185,17 +238,18 @@ impl SolverTab {
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing = egui::vec2(4.0, 0.0);
-                        ui.set_height(28.0);
-                        for (index, hand) in self.hands.iter().enumerate() {
-                            let title = hand.tab_title();
-                            let (clicked, closed, middle) = draw_hand_tab(
+                        ui.set_height(32.0);
+                        for (index, tab) in self.tabs.iter().enumerate() {
+                            let title = tab.tab_title();
+                            let is_import = tab.is_import();
+                            let (clicked, closed, middle) = draw_workspace_tab(
                                 ui,
                                 &title,
                                 index == self.active,
-                                hand.computing,
-                                closable,
+                                tab.is_computing(),
+                                is_import,
                             );
-                            if closed || (middle && closable) {
+                            if closed || middle {
                                 close = Some(index);
                             } else if clicked {
                                 select = Some(index);
@@ -211,22 +265,58 @@ impl SolverTab {
             if add_response.on_hover_text("Новая раздача").clicked() {
                 add = true;
             }
+            let import_response = ui.add_sized(
+                [28.0, 22.0],
+                egui::Button::new(RichText::new("📂").size(14.0)),
+            );
+            if import_response
+                .on_hover_text("Загрузить файлы истории рук")
+                .clicked()
+            {
+                import = true;
+            }
         });
 
         if let Some(index) = select {
             self.active = index;
         }
         if let Some(index) = close {
-            self.close_hand(index);
+            self.close_tab(index);
         }
         if add {
             self.add_hand();
         }
+        if import {
+            self.open_import_files();
+        }
         if start_calc {
-            if let Some(hand) = self.hands.get_mut(self.active) {
+            if let Some(hand) = self.active_hand_mut() {
                 let ctx = ui.ctx().clone();
                 hand.start_calculation(&ctx);
             }
+        }
+    }
+
+    pub fn open_hand(&mut self, request: OpenHandRequest, ctx: &Context) {
+        self.add_hand();
+        self.settings_open = false;
+        if let Some(hand) = self.active_hand_mut() {
+            hand.apply_open_request(request);
+            hand.start_calculation(ctx);
+        }
+    }
+
+    fn active_hand(&self) -> Option<&SolverHand> {
+        match self.tabs.get(self.active) {
+            Some(WorkspaceTab::Hand(hand)) => Some(hand),
+            _ => None,
+        }
+    }
+
+    fn active_hand_mut(&mut self) -> Option<&mut SolverHand> {
+        match self.tabs.get_mut(self.active) {
+            Some(WorkspaceTab::Hand(hand)) => Some(hand),
+            _ => None,
         }
     }
 
@@ -234,25 +324,65 @@ impl SolverTab {
         let id = self.next_hand_id;
         self.next_hand_id += 1;
         let cache = self
-            .hands
-            .first()
-            .map(|hand| hand.equity_cache.clone())
+            .tabs
+            .iter()
+            .find_map(|tab| match tab {
+                WorkspaceTab::Hand(hand) => Some(hand.equity_cache.clone()),
+                WorkspaceTab::Import(_) => None,
+            })
             .unwrap_or_else(|| {
                 EquityCache::from_bytes(CACHE_BYTES).expect("embedded cache corrupted")
             });
-        self.hands.push(SolverHand::with_cache(id, cache));
-        self.active = self.hands.len() - 1;
+        self.tabs.push(WorkspaceTab::Hand(SolverHand::with_cache(id, cache)));
+        self.active = self.tabs.len() - 1;
     }
 
-    fn close_hand(&mut self, index: usize) {
-        if self.hands.len() <= 1 || index >= self.hands.len() {
+    fn open_import_files(&mut self) {
+        let files = rfd::FileDialog::new()
+            .add_filter("Hand history", &["txt"])
+            .set_title("Import from Hand History Files")
+            .pick_files();
+        let Some(files) = files else {
+            return;
+        };
+        let mut import = ImportTab::new(self.next_import_id);
+        self.next_import_id += 1;
+        import.import_paths(files);
+        self.tabs.push(WorkspaceTab::Import(import));
+        self.active = self.tabs.len() - 1;
+    }
+
+    fn close_tab(&mut self, index: usize) {
+        if index >= self.tabs.len() {
             return;
         }
-        self.hands.remove(index);
-        if self.active >= self.hands.len() {
-            self.active = self.hands.len() - 1;
+        self.tabs.remove(index);
+        if self.tabs.is_empty() {
+            self.active = 0;
+        } else if self.active >= self.tabs.len() {
+            self.active = self.tabs.len() - 1;
         } else if index < self.active {
             self.active -= 1;
+        }
+    }
+}
+
+impl WorkspaceTab {
+    fn tab_title(&self) -> String {
+        match self {
+            Self::Hand(hand) => hand.tab_title(),
+            Self::Import(import) => import.tab_title(),
+        }
+    }
+
+    fn is_import(&self) -> bool {
+        matches!(self, Self::Import(_))
+    }
+
+    fn is_computing(&self) -> bool {
+        match self {
+            Self::Hand(hand) => hand.computing,
+            Self::Import(import) => import.is_analyzing(),
         }
     }
 }
@@ -286,6 +416,7 @@ impl SolverHand {
             selected_path: None,
             locked_ranges: HashMap::new(),
             range_editor: None,
+            pending_spot: None,
         }
     }
 
@@ -299,6 +430,22 @@ impl SolverHand {
         } else {
             "Рассчитать"
         }
+    }
+
+    fn apply_open_request(&mut self, request: OpenHandRequest) {
+        self.set_player_count(request.player_count);
+        self.stack_chips = request.stacks.iter().copied().map(format_stack).collect();
+        self.prize_percents = request.prize_percents;
+        self.small_blind = format_stack(request.small_blind);
+        self.big_blind = format_stack(request.big_blind);
+        self.ante = format_stack(request.ante);
+        self.pending_spot = Some((request.actions_before, request.hero_label));
+        self.result = None;
+        self.tree.clear();
+        self.selected_path = None;
+        self.error = None;
+        self.locked_ranges.clear();
+        self.range_editor = None;
     }
 
     fn ui(&mut self, ctx: &Context, settings_open: &mut bool, settings_anim: &mut f32) {
@@ -498,10 +645,15 @@ impl SolverHand {
         if let Some(rx) = &self.worker_rx {
             match rx.try_recv() {
                 Ok(SolverWorkerMessage::Done(result)) => {
-                    let keep_path = self.selected_path.clone();
                     self.tree = build_strategy_tree(&result.output, result.input.button_index);
-                    self.selected_path =
-                        keep_path.filter(|path| node_at_path(&self.tree, path).is_some());
+                    if let Some((actions, hero_label)) = self.pending_spot.take() {
+                        self.selected_path =
+                            find_hero_decision_path(&self.tree, &actions, &hero_label);
+                    } else {
+                        let keep_path = self.selected_path.clone();
+                        self.selected_path =
+                            keep_path.filter(|path| node_at_path(&self.tree, path).is_some());
+                    }
                     if self.selected_path.is_none() && !self.tree.is_empty() {
                         self.selected_path = Some(vec![0]);
                     }
@@ -829,6 +981,7 @@ impl SolverHand {
                             false,
                             is_raise,
                             true,
+                            None,
                         );
                     }
                 }
@@ -985,6 +1138,7 @@ impl SolverHand {
                         true,
                         editor.is_raise,
                         false,
+                        None,
                     ) {
                         editor.slider_pct = combo_share(&editor.range) * 100.0;
                     }
@@ -1237,12 +1391,12 @@ fn format_stack(value: f64) -> String {
     }
 }
 
-fn draw_hand_tab(
+fn draw_workspace_tab(
     ui: &mut Ui,
     title: &str,
     selected: bool,
     computing: bool,
-    closable: bool,
+    is_import: bool,
 ) -> (bool, bool, bool) {
     let mut close_clicked = false;
     let mut close_contains = false;
@@ -1263,40 +1417,55 @@ fn draw_hand_tab(
         sw: 0.0,
         se: 0.0,
     };
+    let font_size = if is_import { 15.0 } else { 13.0 };
+    let tab_height = if is_import { 26.0 } else { 20.0 };
+    let h_margin = if is_import { 14.0 } else { 8.0 };
+    let v_margin = if is_import { 7.0 } else { 4.0 };
 
     let inner = egui::Frame::none()
         .fill(fill)
         .rounding(rounding)
-        .inner_margin(egui::Margin::symmetric(8.0, 4.0))
+        .inner_margin(egui::Margin::symmetric(h_margin, v_margin))
         .show(ui, |ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(4.0, 0.0);
+            ui.spacing_mut().item_spacing = egui::vec2(6.0, 0.0);
             ui.horizontal(|ui| {
-                ui.set_height(20.0);
+                ui.set_height(tab_height);
+                if is_import {
+                    ui.set_min_width(96.0);
+                }
                 if computing {
-                    ui.add(egui::Spinner::new().size(11.0));
+                    ui.add(egui::Spinner::new().size(if is_import { 13.0 } else { 11.0 }));
+                } else if is_import {
+                    draw_import_icon(ui, text_color);
                 } else {
                     draw_hand_icon(ui, text_color, fill);
                 }
-                ui.add(egui::Label::new(RichText::new(title).color(text_color)).selectable(false));
-                if closable {
-                    let close = ui.add(
-                        egui::Button::new(RichText::new("×").size(14.0).color(text_color))
-                            .frame(false)
-                            .sense(egui::Sense::click())
-                            .min_size(egui::vec2(18.0, 18.0)),
-                    );
-                    close_contains = close.hovered() || close.contains_pointer();
-                    if close.on_hover_text("Закрыть").clicked() {
-                        close_clicked = true;
-                    }
+                ui.add(
+                    egui::Label::new(RichText::new(title).size(font_size).color(text_color))
+                        .selectable(false),
+                );
+                let close = ui.add(
+                    egui::Button::new(RichText::new("×").size(if is_import { 16.0 } else { 14.0 }).color(text_color))
+                        .frame(false)
+                        .sense(egui::Sense::click())
+                        .min_size(egui::vec2(if is_import { 20.0 } else { 18.0 }, 18.0)),
+                );
+                close_contains = close.hovered() || close.contains_pointer();
+                if close.on_hover_text("Закрыть").clicked() {
+                    close_clicked = true;
                 }
             });
         });
 
+    let hint = if is_import {
+        format!("Турниры {title}")
+    } else {
+        format!("Раздача {title}")
+    };
     let response = inner
         .response
         .interact(egui::Sense::click())
-        .on_hover_text(format!("Раздача {title}"));
+        .on_hover_text(hint);
     if close_contains && (response.clicked() || close_clicked) {
         close_clicked = true;
     }
@@ -1317,6 +1486,21 @@ fn draw_hand_icon(ui: &mut Ui, color: egui::Color32, fill: egui::Color32) {
     painter.rect_stroke(back, rounding, stroke);
     painter.rect_filled(front, rounding, fill);
     painter.rect_stroke(front, rounding, stroke);
+}
+
+fn draw_import_icon(ui: &mut Ui, color: egui::Color32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
+    let painter = ui.painter();
+    let stroke = egui::Stroke::new(1.2_f32, color);
+    let page = egui::Rect::from_min_size(rect.min + egui::vec2(2.0, 1.0), egui::vec2(12.0, 14.0));
+    painter.rect_stroke(page, 1.5, stroke);
+    for i in 0..3 {
+        let y = page.top() + 4.0 + i as f32 * 3.2;
+        painter.line_segment(
+            [egui::pos2(page.left() + 2.5, y), egui::pos2(page.right() - 2.5, y)],
+            stroke,
+        );
+    }
 }
 
 fn compact_param_field(ui: &mut Ui, label: &str, value: &mut String, width: f32) {
@@ -1610,27 +1794,29 @@ mod tests {
     #[test]
     fn solver_starts_with_one_hand_tab() {
         let tab = SolverTab::default();
-        assert_eq!(tab.hands.len(), 1);
+        assert_eq!(tab.tabs.len(), 1);
         assert_eq!(tab.active, 0);
-        assert_eq!(tab.hands[0].tab_title(), "#1");
+        assert_eq!(tab.tabs[0].tab_title(), "#1");
     }
 
     #[test]
     fn add_hand_opens_empty_tab() {
         let mut tab = SolverTab::default();
         tab.add_hand();
-        assert_eq!(tab.hands.len(), 2);
+        assert_eq!(tab.tabs.len(), 2);
         assert_eq!(tab.active, 1);
-        assert_eq!(tab.hands[1].tab_title(), "#2");
-        assert!(tab.hands[1].result.is_none());
-        assert!(!tab.hands[1].computing);
+        assert_eq!(tab.tabs[1].tab_title(), "#2");
+        assert!(matches!(
+            &tab.tabs[1],
+            WorkspaceTab::Hand(hand) if hand.result.is_none() && !hand.computing
+        ));
     }
 
     #[test]
-    fn close_last_hand_is_noop() {
+    fn close_last_hand_clears_workspace() {
         let mut tab = SolverTab::default();
-        tab.close_hand(0);
-        assert_eq!(tab.hands.len(), 1);
+        tab.close_tab(0);
+        assert!(tab.tabs.is_empty());
         assert_eq!(tab.active, 0);
     }
 
@@ -1640,16 +1826,16 @@ mod tests {
         tab.add_hand();
         tab.add_hand();
         assert_eq!(tab.active, 2);
-        tab.close_hand(2);
-        assert_eq!(tab.hands.len(), 2);
+        tab.close_tab(2);
+        assert_eq!(tab.tabs.len(), 2);
         assert_eq!(tab.active, 1);
 
         tab.active = 0;
-        let remaining_id = tab.hands[1].id;
-        tab.close_hand(0);
-        assert_eq!(tab.hands.len(), 1);
+        let remaining_title = tab.tabs[1].tab_title();
+        tab.close_tab(0);
+        assert_eq!(tab.tabs.len(), 1);
         assert_eq!(tab.active, 0);
-        assert_eq!(tab.hands[0].id, remaining_id);
+        assert_eq!(tab.tabs[0].tab_title(), remaining_title);
     }
 
 }

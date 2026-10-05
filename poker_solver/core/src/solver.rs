@@ -70,6 +70,18 @@ pub struct ThreeMaxHandEvs {
 
 pub(crate) const HAND_EV_SCALE: f64 = 100.0;
 
+pub(crate) fn scaled_action_evs(evs: &[[(f64, f64); HAND_TYPES]]) -> Vec<[f64; HAND_TYPES]> {
+    evs.iter()
+        .map(|node| {
+            let mut out = [0.0; HAND_TYPES];
+            for (h, &(ev_action, ev_fold)) in node.iter().enumerate() {
+                out[h] = (ev_action - ev_fold) * HAND_EV_SCALE;
+            }
+            out
+        })
+        .collect()
+}
+
 /// Выходные данные солвера.
 #[derive(Debug, Clone)]
 pub struct SolverOutput {
@@ -198,6 +210,7 @@ pub struct FourMaxRanges {
     pub bb_call_vs_btn_sb: [f64; HAND_TYPES],
     pub bb_call_vs_btn: [f64; HAND_TYPES],
     pub bb_call_vs_sb: [f64; HAND_TYPES],
+    pub ev: Vec<[f64; HAND_TYPES]>,
 }
 
 pub const FIVE_MAX_NODES: usize = 30;
@@ -206,6 +219,7 @@ pub const FIVE_MAX_NODES: usize = 30;
 #[derive(Debug, Clone)]
 pub struct FiveMaxRanges {
     pub freq: Vec<[f64; HAND_TYPES]>,
+    pub ev: Vec<[f64; HAND_TYPES]>,
 }
 
 /// Info set 5-max: игрок `actor` (0=HJ … 4=BB) при маске уже зашедших.
@@ -225,6 +239,7 @@ pub const SIX_MAX_NODES: usize = 62;
 #[derive(Debug, Clone)]
 pub struct SixMaxRanges {
     pub freq: Vec<[f64; HAND_TYPES]>,
+    pub ev: Vec<[f64; HAND_TYPES]>,
 }
 
 /// Info set 6-max: игрок `actor` (0=UTG … 5=BB) при маске уже зашедших.
@@ -245,6 +260,7 @@ pub const SEVEN_MAX_NODES: usize = 126;
 #[derive(Debug, Clone)]
 pub struct SevenMaxRanges {
     pub freq: Vec<[f64; HAND_TYPES]>,
+    pub ev: Vec<[f64; HAND_TYPES]>,
 }
 
 /// Info set 7-max: игрок `actor` (0=UTG … 6=BB) при маске уже зашедших.
@@ -266,6 +282,7 @@ pub const EIGHT_MAX_NODES: usize = 254;
 #[derive(Debug, Clone)]
 pub struct EightMaxRanges {
     pub freq: Vec<[f64; HAND_TYPES]>,
+    pub ev: Vec<[f64; HAND_TYPES]>,
 }
 
 /// Info set 8-max: игрок `actor` (0=UTG … 7=BB) при маске уже зашедших.
@@ -288,6 +305,7 @@ pub const NINE_MAX_NODES: usize = 510;
 #[derive(Debug, Clone)]
 pub struct NineMaxRanges {
     pub freq: Vec<[f64; HAND_TYPES]>,
+    pub ev: Vec<[f64; HAND_TYPES]>,
 }
 
 /// Info set 9-max: игрок `actor` (0=UTG … 8=BB) при маске уже зашедших.

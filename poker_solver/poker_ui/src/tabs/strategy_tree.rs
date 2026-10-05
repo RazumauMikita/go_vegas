@@ -58,17 +58,29 @@ impl TreeNode {
 
 pub fn build_strategy_tree(output: &SolverOutput, button_index: usize) -> Vec<TreeNode> {
     let mut tree = if let Some(ranges) = output.nine_max.as_ref() {
-        build_9max_tree(ranges, output, button_index)
+        let mut tree = build_9max_tree(ranges, output, button_index);
+        attach_node_evs(&mut tree, &ranges.ev);
+        tree
     } else if let Some(ranges) = output.eight_max.as_ref() {
-        build_8max_tree(ranges, output, button_index)
+        let mut tree = build_8max_tree(ranges, output, button_index);
+        attach_node_evs(&mut tree, &ranges.ev);
+        tree
     } else if let Some(ranges) = output.seven_max.as_ref() {
-        build_7max_tree(ranges, output, button_index)
+        let mut tree = build_7max_tree(ranges, output, button_index);
+        attach_node_evs(&mut tree, &ranges.ev);
+        tree
     } else if let Some(ranges) = output.six_max.as_ref() {
-        build_6max_tree(ranges, output, button_index)
+        let mut tree = build_6max_tree(ranges, output, button_index);
+        attach_node_evs(&mut tree, &ranges.ev);
+        tree
     } else if let Some(ranges) = output.five_max.as_ref() {
-        build_5max_tree(ranges, output, button_index)
+        let mut tree = build_5max_tree(ranges, output, button_index);
+        attach_node_evs(&mut tree, &ranges.ev);
+        tree
     } else if let Some(ranges) = output.four_max.as_ref() {
-        build_4max_tree(ranges, output, button_index)
+        let mut tree = build_4max_tree(ranges, output, button_index);
+        attach_node_evs(&mut tree, &ranges.ev);
+        tree
     } else if let Some(ranges) = output.three_max.as_ref() {
         let hand_evs = output.three_max_hand_evs.as_ref();
         build_3max_tree(ranges, hand_evs)
@@ -77,6 +89,15 @@ pub fn build_strategy_tree(output: &SolverOutput, button_index: usize) -> Vec<Tr
     };
     expand_one_level(&mut tree);
     tree
+}
+
+fn attach_node_evs(tree: &mut [TreeNode], evs: &[[f64; 169]]) {
+    for node in tree {
+        if let Some(ev) = evs.get(node.range_id).copied() {
+            node.ev_range = Some(ev);
+        }
+        attach_node_evs(&mut node.children, evs);
+    }
 }
 
 fn expand_one_level(tree: &mut [TreeNode]) {
@@ -113,6 +134,46 @@ pub fn node_at_path_mut<'a>(tree: &'a mut [TreeNode], path: &[usize]) -> Option<
         current = current.children.get_mut(index)?;
     }
     Some(current)
+}
+
+pub fn find_hero_decision_path(
+    tree: &[TreeNode],
+    actions_before: &[(String, bool)],
+    hero_label: &str,
+) -> Option<NodePath> {
+    walk_spot(tree, Vec::new(), 0, actions_before, hero_label)
+}
+
+fn walk_spot(
+    siblings: &[TreeNode],
+    path: NodePath,
+    skip: usize,
+    remaining: &[(String, bool)],
+    hero: &str,
+) -> Option<NodePath> {
+    if skip > siblings.len() {
+        return None;
+    }
+    if remaining.is_empty() {
+        let view = &siblings[skip..];
+        let j = view.iter().position(|node| node.player() == hero)?;
+        let mut next = path;
+        next.push(skip + j);
+        return Some(next);
+    }
+    let (pos, is_fold) = &remaining[0];
+    let view = &siblings[skip..];
+    let Some(j) = view.iter().position(|node| node.player() == pos.as_str()) else {
+        return walk_spot(siblings, path, skip, &remaining[1..], hero);
+    };
+    let abs = skip + j;
+    if *is_fold {
+        walk_spot(siblings, path, abs + 1, &remaining[1..], hero)
+    } else {
+        let mut next = path;
+        next.push(abs);
+        walk_spot(&siblings[abs].children, next, 0, &remaining[1..], hero)
+    }
 }
 
 pub fn draw_strategy_tree_header(ui: &mut Ui) {
@@ -2070,6 +2131,44 @@ mod tests {
         assert_eq!(tree[0].children[0].children[0].label, "BB call (vs BTN+SB)");
         assert_eq!(tree[1].label, "SB push (BTN fold)");
         assert_eq!(tree[1].children[0].label, "BB call (vs SB)");
+    }
+
+    #[test]
+    fn finds_hero_spot_after_btn_fold() {
+        let tree = build_3max_tree(&empty_3max_ranges(), None);
+        let path = find_hero_decision_path(
+            &tree,
+            &[("BTN".to_string(), true)],
+            "SB",
+        );
+        assert_eq!(path, Some(vec![1]));
+    }
+
+    #[test]
+    fn finds_bb_call_vs_btn() {
+        let tree = build_3max_tree(&empty_3max_ranges(), None);
+        let path = find_hero_decision_path(
+            &tree,
+            &[("BTN".to_string(), false), ("SB".to_string(), true)],
+            "BB",
+        );
+        assert_eq!(path, Some(vec![0, 1]));
+    }
+
+    #[test]
+    fn attach_node_evs_fills_call_nodes() {
+        let mut tree = vec![make_node(
+            1,
+            "BTN call (vs CO)",
+            Action::Call,
+            [0.0; 169],
+            None,
+            vec![],
+        )];
+        let mut evs = vec![[0.0; 169]; 2];
+        evs[1][0] = 1.5;
+        attach_node_evs(&mut tree, &evs);
+        assert_eq!(tree[0].ev_range.unwrap()[0], 1.5);
     }
 }
 

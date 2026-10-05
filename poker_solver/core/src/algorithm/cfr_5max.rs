@@ -13,8 +13,8 @@ use crate::equity_3way::{apply_permutation, RANK_PERMUTATIONS as PERM3};
 use crate::equity_cache::{expand_combo, EquityCache};
 use crate::four_way_rank_cache::FourWayRankCache;
 use crate::solver::{
-    empty_output, five_node, tournament_equity, FiveMaxRanges, SolverInput, SolverOutput,
-    FIVE_MAX_NODES, HAND_EV_SCALE, HAND_TYPES,
+    empty_output, five_node, scaled_action_evs, tournament_equity, FiveMaxRanges, SolverInput,
+    SolverOutput, FIVE_MAX_NODES, HAND_EV_SCALE, HAND_TYPES,
 };
 use crate::three_way_rank_cache::ThreeWayRankCache;
 
@@ -389,7 +389,10 @@ impl SolverAlgorithm for Cfr5Max {
             hand_evs,
             three_max_hand_evs: None,
             four_max: None,
-            five_max: Some(FiveMaxRanges { freq }),
+            five_max: Some(FiveMaxRanges {
+                freq,
+                ev: scaled_action_evs(&evs),
+            }),
             six_max: None,
             seven_max: None,
             eight_max: None,

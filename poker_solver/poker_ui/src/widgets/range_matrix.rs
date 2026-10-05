@@ -10,7 +10,6 @@ const HRC_GREEN: egui::Color32 = egui::Color32::from_rgb(110, 198, 82);
 const HRC_RED: egui::Color32 = egui::Color32::from_rgb(240, 148, 148);
 const HRC_WHITE: egui::Color32 = egui::Color32::from_rgb(252, 252, 252);
 const HRC_PURPLE: egui::Color32 = egui::Color32::from_rgb(186, 88, 186);
-const HRC_CALL: egui::Color32 = egui::Color32::from_rgb(196, 86, 86);
 const HRC_FOLD: egui::Color32 = egui::Color32::from_rgb(196, 196, 196);
 const HRC_HEADER: egui::Color32 = egui::Color32::from_rgb(70, 141, 196);
 const TEXT_DARK: egui::Color32 = egui::Color32::from_rgb(32, 32, 32);
@@ -114,8 +113,9 @@ pub fn range_matrix_ui(
     mode: &mut MatrixMode,
     title: &str,
     editable: bool,
-    is_raise: bool,
+    _is_raise: bool,
     show_mode_toggle: bool,
+    highlight_combo: Option<usize>,
 ) -> bool {
     let share = combo_share(range);
     let width = ui.available_width().max(13.0 * CELL_MIN);
@@ -185,16 +185,18 @@ pub fn range_matrix_ui(
             let (bg, value) = match *mode {
                 MatrixMode::Frequency => {
                     let freq = range[idx].clamp(0.0, 1.0);
-                    let color = lerp_color(
-                        HRC_WHITE,
-                        if is_raise { HRC_PURPLE } else { HRC_CALL },
-                        freq as f32,
-                    );
+                    let color = lerp_color(HRC_WHITE, HRC_PURPLE, freq as f32);
                     (color, format!("{:.0}", freq * 100.0))
                 }
                 MatrixMode::Ev => {
-                    let ev = hand_evs.map(|evs| evs[idx]).unwrap_or(0.0);
-                    (ev_color(ev), format!("{ev:+.2}"))
+                    if let Some(evs) = hand_evs {
+                        let ev = evs[idx];
+                        (ev_color(ev), format!("{ev:+.2}"))
+                    } else {
+                        let freq = range[idx].clamp(0.0, 1.0);
+                        let color = lerp_color(HRC_WHITE, HRC_PURPLE, freq as f32);
+                        (color, format!("{:.0}", freq * 100.0))
+                    }
                 }
             };
 
@@ -213,11 +215,18 @@ pub fn range_matrix_ui(
                 egui::FontId::proportional(value_font),
                 TEXT_DARK,
             );
+            if highlight_combo == Some(idx) {
+                ui.painter().rect_stroke(
+                    rect.shrink(0.5),
+                    0.0,
+                    egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(30, 80, 170)),
+                );
+            }
         }
     }
 
     ui.add_space(2.0);
-    action_bar_ui(ui, share, is_raise, grid_w);
+    action_bar_ui(ui, share, grid_w);
     changed
 }
 
@@ -307,7 +316,7 @@ fn cell_rect(grid: egui::Rect, row: u8, col: u8, cell_w: f32, cell_h: f32) -> eg
     egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(cell_w, cell_h))
 }
 
-fn action_bar_ui(ui: &mut egui::Ui, share: f64, is_raise: bool, width: f32) {
+fn action_bar_ui(ui: &mut egui::Ui, share: f64, width: f32) {
     let play = share.clamp(0.0, 1.0) as f32;
     let fold = 1.0 - play;
     let height = BAR_H;
@@ -319,11 +328,7 @@ fn action_bar_ui(ui: &mut egui::Ui, share: f64, is_raise: bool, width: f32) {
         egui::Rect::from_min_size(rect.min + egui::vec2(fold_w, 0.0), egui::vec2(play_w, height));
 
     ui.painter().rect_filled(fold_rect, 0.0, HRC_FOLD);
-    ui.painter().rect_filled(
-        play_rect,
-        0.0,
-        if is_raise { HRC_PURPLE } else { HRC_CALL },
-    );
+    ui.painter().rect_filled(play_rect, 0.0, HRC_PURPLE);
 
     if fold > 0.08 {
         ui.painter().text(

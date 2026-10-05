@@ -31,8 +31,10 @@ pub use four_way_rank_cache::{
 };
 pub use hand_evaluator::{evaluate_hand, HandCategory, HandRank};
 pub use hh_parser::{
-    is_non_push_fold_situation, parse_hand_history, position_label as hh_position_label,
-    solver_position_index, ParseError, ParsedHand, ParsedPlayer, Position,
+    is_non_push_fold_situation, parse_hand_histories, parse_hand_history, parse_imported_hand,
+    position_label as hh_position_label, solver_position_index, solver_seat_label,
+    split_hand_histories, table_position_label, HeroActionKind, ImportedAction, ImportedHand,
+    ParseError, ParsedHand, ParsedPlayer, Position,
 };
 pub use icm::{icm_equity, icm_equity_for_player};
 pub use solver::{

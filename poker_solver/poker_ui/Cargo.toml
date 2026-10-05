@@ -15,3 +15,4 @@ poker-core = { path = "../core" }
 eframe = "0.29"
 egui = "0.29"
 arboard = "3.6"
+rfd = "0.15"

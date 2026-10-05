@@ -1,6 +1,7 @@
 mod equity_tab;
 mod eval_tab;
 mod icm_tab;
+mod import_tab;
 mod solver_tab;
 mod strategy_tree;
 
