@@ -373,31 +373,31 @@ fn build_3max_tree(ranges: &ThreeMaxRanges, hand_evs: Option<&ThreeMaxHandEvs>) 
             Action::Raise,
             ranges.btn_push,
             evs.map(|e| e.btn_push),
-            vec![make_node(
-                1,
-                "SB call",
-                Action::Call,
-                ranges.sb_call_vs_btn,
-                evs.map(|e| e.sb_call_vs_btn),
-                vec![
-                    make_node(
+            vec![
+                make_node(
+                    1,
+                    "SB call",
+                    Action::Call,
+                    ranges.sb_call_vs_btn,
+                    evs.map(|e| e.sb_call_vs_btn),
+                    vec![make_node(
                         3,
                         "BB call (vs BTN+SB)",
                         Action::CallSpecial,
                         ranges.bb_call_vs_btn_and_sb,
                         evs.map(|e| e.bb_call_vs_btn_and_sb),
                         vec![],
-                    ),
-                    make_node(
-                        2,
-                        "BB call (vs BTN)",
-                        Action::Call,
-                        ranges.bb_call_vs_btn,
-                        evs.map(|e| e.bb_call_vs_btn),
-                        vec![],
-                    ),
-                ],
-            )],
+                    )],
+                ),
+                make_node(
+                    2,
+                    "BB call (vs BTN)",
+                    Action::Call,
+                    ranges.bb_call_vs_btn,
+                    evs.map(|e| e.bb_call_vs_btn),
+                    vec![],
+                ),
+            ],
         ),
         make_node(
             4,
@@ -2017,6 +2017,17 @@ fn build_hu_tree(output: &SolverOutput) -> Vec<TreeNode> {
 mod tests {
     use super::*;
 
+    fn empty_3max_ranges() -> ThreeMaxRanges {
+        ThreeMaxRanges {
+            btn_push: [0.0; 169],
+            sb_call_vs_btn: [0.0; 169],
+            bb_call_vs_btn: [0.0; 169],
+            bb_call_vs_btn_and_sb: [0.0; 169],
+            sb_push: [0.0; 169],
+            bb_call_vs_sb: [0.0; 169],
+        }
+    }
+
     #[test]
     fn expand_one_level_keeps_deeper_nodes_collapsed() {
         let mut tree = vec![make_node(
@@ -2045,6 +2056,20 @@ mod tests {
         assert!(tree[0].expanded);
         assert!(!tree[0].children[0].expanded);
         assert!(!tree[0].children[0].children[0].expanded);
+    }
+
+    #[test]
+    fn three_max_tree_matches_hrc_nesting() {
+        let tree = build_3max_tree(&empty_3max_ranges(), None);
+        assert_eq!(tree.len(), 2);
+        assert_eq!(tree[0].label, "BTN push");
+        assert_eq!(tree[0].children.len(), 2);
+        assert_eq!(tree[0].children[0].label, "SB call");
+        assert_eq!(tree[0].children[1].label, "BB call (vs BTN)");
+        assert_eq!(tree[0].children[0].children.len(), 1);
+        assert_eq!(tree[0].children[0].children[0].label, "BB call (vs BTN+SB)");
+        assert_eq!(tree[1].label, "SB push (BTN fold)");
+        assert_eq!(tree[1].children[0].label, "BB call (vs SB)");
     }
 }
 

@@ -115,14 +115,19 @@ pub fn range_matrix_ui(
     title: &str,
     editable: bool,
     is_raise: bool,
+    show_mode_toggle: bool,
 ) -> bool {
     let share = combo_share(range);
     let width = ui.available_width().max(13.0 * CELL_MIN);
 
-    ui.horizontal(|ui| {
-        ui.selectable_value(mode, MatrixMode::Ev, "EV");
-        ui.selectable_value(mode, MatrixMode::Frequency, "Frequency");
-    });
+    if show_mode_toggle {
+        ui.horizontal(|ui| {
+            ui.selectable_value(mode, MatrixMode::Ev, "EV");
+            ui.selectable_value(mode, MatrixMode::Frequency, "Frequency");
+        });
+    } else {
+        *mode = MatrixMode::Frequency;
+    }
 
     if !title.is_empty() {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(width, HEADER_H), egui::Sense::hover());
@@ -140,7 +145,14 @@ pub fn range_matrix_ui(
     ui.add_space(2.0);
     let grid_h = (ui.available_height() - BAR_H - 4.0).max(13.0 * CELL_MIN);
     let grid_w = ui.available_width().max(13.0 * CELL_MIN);
-    let (grid_rect, _) = ui.allocate_exact_size(egui::vec2(grid_w, grid_h), egui::Sense::hover());
+    let can_edit = editable && *mode == MatrixMode::Frequency;
+    let grid_sense = if can_edit {
+        egui::Sense::click_and_drag()
+    } else {
+        egui::Sense::hover()
+    };
+    let (grid_rect, grid_response) =
+        ui.allocate_exact_size(egui::vec2(grid_w, grid_h), grid_sense);
 
     let cell_w = ((grid_rect.width() - GRID_GAP * 12.0) / 13.0).max(1.0);
     let cell_h = ((grid_rect.height() - GRID_GAP * 12.0) / 13.0).max(1.0);
@@ -149,38 +161,26 @@ pub fn range_matrix_ui(
 
     let paint_id = ui.id().with("range_paint");
     let mut changed = false;
-    let can_edit = editable && *mode == MatrixMode::Frequency;
-    let sense = if can_edit {
-        egui::Sense::click_and_drag()
-    } else {
-        egui::Sense::hover()
-    };
+    if can_edit {
+        changed = paint_range_cells(
+            ui,
+            range,
+            &grid_response,
+            grid_rect,
+            cell_w,
+            cell_h,
+            paint_id,
+        );
+        if grid_response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+    }
 
     for row in 0..13_u8 {
         for col in 0..13_u8 {
             let idx = matrix_combo_index(row, col) as usize;
             let label = combo_label(matrix_combo_index(row, col));
             let rect = cell_rect(grid_rect, row, col, cell_w, cell_h);
-            let id = ui.id().with(("range_cell", row, col));
-            let response = ui.interact(rect, id, sense);
-
-            if can_edit {
-                if response.clicked() || response.drag_started() {
-                    let next = if range[idx] > 0.5 { 0.0 } else { 1.0 };
-                    ui.memory_mut(|mem| mem.data.insert_temp(paint_id, next));
-                    if (range[idx] - next).abs() > 1e-12 {
-                        range[idx] = next;
-                        changed = true;
-                    }
-                } else if response.hovered() && ui.input(|i| i.pointer.primary_down()) {
-                    if let Some(next) = ui.memory(|mem| mem.data.get_temp::<f64>(paint_id)) {
-                        if (range[idx] - next).abs() > 1e-12 {
-                            range[idx] = next;
-                            changed = true;
-                        }
-                    }
-                }
-            }
 
             let (bg, value) = match *mode {
                 MatrixMode::Frequency => {
@@ -219,6 +219,86 @@ pub fn range_matrix_ui(
     ui.add_space(2.0);
     action_bar_ui(ui, share, is_raise, grid_w);
     changed
+}
+
+fn paint_range_cells(
+    ui: &mut egui::Ui,
+    range: &mut [f64; 169],
+    grid_response: &egui::Response,
+    grid_rect: egui::Rect,
+    cell_w: f32,
+    cell_h: f32,
+    paint_id: egui::Id,
+) -> bool {
+    let mut changed = false;
+    let pointer_pos = ui.input(|i| i.pointer.interact_pos());
+    let primary_pressed = ui.input(|i| i.pointer.primary_pressed());
+    let primary_down = ui.input(|i| i.pointer.primary_down());
+    let primary_released = ui.input(|i| i.pointer.primary_released());
+
+    if primary_released {
+        ui.memory_mut(|mem| mem.data.remove::<f64>(paint_id));
+        return changed;
+    }
+
+    let over_grid = pointer_pos
+        .map(|pos| grid_rect.contains(pos))
+        .unwrap_or(false);
+    let press_on_grid = primary_pressed && (over_grid || grid_response.contains_pointer());
+
+    if press_on_grid {
+        let idx = ui
+            .input(|i| i.pointer.press_origin())
+            .or(pointer_pos)
+            .and_then(|pos| cell_index_at(grid_rect, pos, cell_w, cell_h));
+        if let Some(idx) = idx {
+            let next = if range[idx] > 0.5 { 0.0 } else { 1.0 };
+            ui.memory_mut(|mem| mem.data.insert_temp(paint_id, next));
+            if (range[idx] - next).abs() > 1e-12 {
+                range[idx] = next;
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
+    if primary_down {
+        if let Some(next) = ui.memory(|mem| mem.data.get_temp::<f64>(paint_id)) {
+            if let Some(idx) =
+                pointer_pos.and_then(|pos| cell_index_at(grid_rect, pos, cell_w, cell_h))
+            {
+                if (range[idx] - next).abs() > 1e-12 {
+                    range[idx] = next;
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    changed
+}
+
+fn cell_index_at(grid: egui::Rect, pos: egui::Pos2, cell_w: f32, cell_h: f32) -> Option<usize> {
+    let (row, col) = cell_at(grid, pos, cell_w, cell_h)?;
+    Some(matrix_combo_index(row, col) as usize)
+}
+
+fn cell_at(grid: egui::Rect, pos: egui::Pos2, cell_w: f32, cell_h: f32) -> Option<(u8, u8)> {
+    if !grid.contains(pos) {
+        return None;
+    }
+    let col = ((pos.x - grid.left()) / (cell_w + GRID_GAP)).floor() as i32;
+    let row = ((pos.y - grid.top()) / (cell_h + GRID_GAP)).floor() as i32;
+    if !(0..13).contains(&row) || !(0..13).contains(&col) {
+        return None;
+    }
+    let row = row as u8;
+    let col = col as u8;
+    if cell_rect(grid, row, col, cell_w, cell_h).contains(pos) {
+        Some((row, col))
+    } else {
+        None
+    }
 }
 
 fn cell_rect(grid: egui::Rect, row: u8, col: u8, cell_w: f32, cell_h: f32) -> egui::Rect {

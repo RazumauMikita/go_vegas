@@ -63,7 +63,6 @@ struct SolverHand {
     ante: String,
     max_iterations: String,
     tolerance: String,
-    algorithm: Algorithm,
     equity_cache: EquityCache,
     matrix_modes: HashMap<String, MatrixMode>,
     error: Option<String>,
@@ -127,6 +126,7 @@ impl SolverTab {
         let mut select = None;
         let mut close = None;
         let mut add = false;
+        let mut start_calc = false;
         let closable = self.hands.len() > 1;
 
         ui.horizontal(|ui| {
@@ -139,8 +139,41 @@ impl SolverTab {
             {
                 self.settings_open = !self.settings_open;
             }
-            if self.hands.get(self.active).is_some_and(|hand| hand.computing) {
+
+            let has_result = self
+                .hands
+                .get(self.active)
+                .is_some_and(|hand| hand.result.is_some());
+            let computing = self
+                .hands
+                .get(self.active)
+                .is_some_and(|hand| hand.computing);
+            let calc_label = self
+                .hands
+                .get(self.active)
+                .map(SolverHand::calc_button_label)
+                .unwrap_or("Рассчитать");
+            if has_result {
+                if ui
+                    .add_enabled(!computing, egui::Button::new(calc_label))
+                    .clicked()
+                {
+                    start_calc = true;
+                }
+            }
+            if computing {
                 ui.spinner();
+            }
+            if let Some(error) = self
+                .hands
+                .get(self.active)
+                .and_then(|hand| hand.error.as_ref())
+            {
+                ui.add(
+                    egui::Label::new(RichText::new(error).color(egui::Color32::RED).small())
+                        .truncate(),
+                )
+                .on_hover_text(error);
             }
             ui.separator();
             let tabs_width = (ui.available_width() - 32.0).max(80.0);
@@ -188,6 +221,12 @@ impl SolverTab {
         }
         if add {
             self.add_hand();
+        }
+        if start_calc {
+            if let Some(hand) = self.hands.get_mut(self.active) {
+                let ctx = ui.ctx().clone();
+                hand.start_calculation(&ctx);
+            }
         }
     }
 
@@ -237,7 +276,6 @@ impl SolverHand {
             ante: "0".to_string(),
             max_iterations: "200".to_string(),
             tolerance: "0.001".to_string(),
-            algorithm: Algorithm::FictitiousPlay,
             equity_cache,
             matrix_modes: HashMap::new(),
             error: None,
@@ -253,6 +291,14 @@ impl SolverHand {
 
     fn tab_title(&self) -> String {
         format!("#{}", self.id)
+    }
+
+    fn calc_button_label(&self) -> &'static str {
+        if self.result.is_some() || !self.locked_ranges.is_empty() {
+            "Пересчитать"
+        } else {
+            "Рассчитать"
+        }
     }
 
     fn ui(&mut self, ctx: &Context, settings_open: &mut bool, settings_anim: &mut f32) {
@@ -572,85 +618,15 @@ impl SolverHand {
             self.draw_prize_table(ui);
         }
 
-        ui.horizontal_wrapped(|ui| {
-            ui.horizontal(|ui| {
-                compact_param_field(ui, "SB:", &mut self.small_blind, 70.0);
-            });
-            ui.horizontal(|ui| {
-                compact_param_field(ui, "BB:", &mut self.big_blind, 70.0);
-            });
-            ui.horizontal(|ui| {
-                compact_param_field(ui, "Ante:", &mut self.ante, 70.0);
-            });
-            ui.horizontal(|ui| {
-                compact_param_field(ui, "Iter:", &mut self.max_iterations, 70.0);
-            });
-            ui.horizontal(|ui| {
-                compact_param_field(ui, "Tol:", &mut self.tolerance, 80.0);
-            });
+        ui.horizontal(|ui| {
+            compact_param_field(ui, "SB:", &mut self.small_blind, 70.0);
+            compact_param_field(ui, "BB:", &mut self.big_blind, 70.0);
+            compact_param_field(ui, "Ante:", &mut self.ante, 70.0);
         });
-
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Algorithm:");
-            let combo_width = (ui.available_width() - 8.0).clamp(160.0, 220.0);
-            egui::ComboBox::from_id_salt(("solver_algorithm", self.id))
-                .selected_text(algorithm_label(self.algorithm))
-                .width(combo_width)
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(
-                        &mut self.algorithm,
-                        Algorithm::FictitiousPlay,
-                        algorithm_label(Algorithm::FictitiousPlay),
-                    );
-                    ui.selectable_value(
-                        &mut self.algorithm,
-                        Algorithm::Cfr,
-                        algorithm_label(Algorithm::Cfr),
-                    );
-                    ui.selectable_value(
-                        &mut self.algorithm,
-                        Algorithm::Cfr3Max,
-                        algorithm_label(Algorithm::Cfr3Max),
-                    );
-                    ui.selectable_value(
-                        &mut self.algorithm,
-                        Algorithm::Cfr4Max,
-                        algorithm_label(Algorithm::Cfr4Max),
-                    );
-                    ui.selectable_value(
-                        &mut self.algorithm,
-                        Algorithm::Cfr5Max,
-                        algorithm_label(Algorithm::Cfr5Max),
-                    );
-                    ui.selectable_value(
-                        &mut self.algorithm,
-                        Algorithm::Cfr6Max,
-                        algorithm_label(Algorithm::Cfr6Max),
-                    );
-                    ui.selectable_value(
-                        &mut self.algorithm,
-                        Algorithm::Cfr7Max,
-                        algorithm_label(Algorithm::Cfr7Max),
-                    );
-                    ui.selectable_value(
-                        &mut self.algorithm,
-                        Algorithm::Cfr8Max,
-                        algorithm_label(Algorithm::Cfr8Max),
-                    );
-                    ui.selectable_value(
-                        &mut self.algorithm,
-                        Algorithm::Cfr9Max,
-                        algorithm_label(Algorithm::Cfr9Max),
-                    );
-                });
+        ui.horizontal(|ui| {
+            compact_param_field(ui, "Iter:", &mut self.max_iterations, 70.0);
+            compact_param_field(ui, "Tol:", &mut self.tolerance, 80.0);
         });
-        ui.label(
-            RichText::new(
-                "FP: быстро, ±2%. CFR: 30 итераций, ±1% (HU) / ±1.5% (3-max). 4–9-max считают только CFR.",
-            )
-                .small()
-                .weak(),
-        );
 
         if let Some(pool_size) = self.parse_prize_sum() {
             let has_blank_prize = self
@@ -739,13 +715,8 @@ impl SolverHand {
                 self.import_hand_from_clipboard();
             }
             let can_run = !self.computing;
-            let calc_label = if self.locked_ranges.is_empty() {
-                "Рассчитать"
-            } else {
-                "Пересчитать"
-            };
             if ui
-                .add_enabled(can_run, egui::Button::new(calc_label))
+                .add_enabled(can_run, egui::Button::new(self.calc_button_label()))
                 .clicked()
             {
                 self.start_calculation(ctx);
@@ -857,6 +828,7 @@ impl SolverHand {
                             &title,
                             false,
                             is_raise,
+                            true,
                         );
                     }
                 }
@@ -980,52 +952,28 @@ impl SolverHand {
             .unwrap_or_default();
 
         let screen = ctx.screen_rect();
-        let max_size = screen.size() * 0.94;
-        let default_size = egui::vec2(
-            (max_size.x * 0.72).clamp(560.0, 980.0),
-            (max_size.y * 0.88).clamp(520.0, 920.0),
-        );
+        let max_size = screen.size() * 0.86;
+        let default_size = egui::vec2(460.0_f32.min(max_size.x), 540.0_f32.min(max_size.y));
         egui::Window::new(title)
-            .id(egui::Id::new(("solver_range_editor", self.id)))
+            .id(egui::Id::new(("solver_range_editor_v2", self.id)))
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
+            .movable(true)
             .constrain(true)
             .default_size(default_size)
-            .min_size([480.0, 420.0])
+            .min_size([360.0, 420.0])
             .max_size(max_size)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(screen.center())
             .show(ctx, |ui| {
                 let Some(editor) = self.range_editor.as_mut() else {
                     return;
                 };
 
-                ui.horizontal(|ui| {
-                    ui.label("Range");
-                    let mut pct = editor.slider_pct;
-                    let width = (ui.available_width() - 8.0).max(120.0);
-                    let slider = ui.add_sized(
-                        [width, 18.0],
-                        egui::Slider::new(&mut pct, 0.0..=100.0)
-                            .suffix("%")
-                            .max_decimals(1),
-                    );
-                    if slider.changed() {
-                        editor.slider_pct = pct;
-                        editor.range = fill_range_to_share(&editor.ranking, pct / 100.0);
-                    }
-                });
-                ui.label(
-                    RichText::new(
-                        "Ползунок набирает руки по EV (или по силе). Клик по ячейке включает/выключает руку.",
-                    )
-                    .small()
-                    .weak(),
-                );
-                ui.add_space(6.0);
-
                 let buttons_h = 32.0;
-                let matrix_h = (ui.available_height() - buttons_h).max(240.0);
+                let slider_h = 44.0;
+                let matrix_h = (ui.available_height() - buttons_h - slider_h - 12.0).max(220.0);
                 let matrix_w = ui.available_width();
                 ui.allocate_ui(egui::vec2(matrix_w, matrix_h), |ui| {
                     if range_matrix_ui(
@@ -1036,19 +984,56 @@ impl SolverHand {
                         "",
                         true,
                         editor.is_raise,
+                        false,
                     ) {
                         editor.slider_pct = combo_share(&editor.range) * 100.0;
                     }
                 });
 
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    ui.label("Range");
+                    ui.spacing_mut().interact_size.y = 36.0;
+                    ui.spacing_mut().slider_rail_height = 16.0;
+                    let drag_w = 72.0;
+                    let slider_w = (ui.available_width() - drag_w - 12.0).max(80.0);
+                    ui.spacing_mut().slider_width = slider_w;
+                    let mut pct = editor.slider_pct;
+                    let slider = ui.add_sized(
+                        [slider_w, 36.0],
+                        egui::Slider::new(&mut pct, 0.0..=100.0)
+                            .show_value(false)
+                            .clamping(egui::SliderClamping::Edits)
+                            .handle_shape(egui::style::HandleShape::Rect { aspect_ratio: 0.45 }),
+                    );
+                    let mut typed = editor.slider_pct;
+                    let drag = ui.add_sized(
+                        [drag_w, 36.0],
+                        egui::DragValue::new(&mut typed)
+                            .range(0.0..=100.0)
+                            .suffix("%")
+                            .max_decimals(1)
+                            .speed(0.1)
+                            .update_while_editing(true)
+                            .clamp_existing_to_range(false),
+                    );
+                    if slider.dragged() || slider.drag_started() {
+                        editor.slider_pct = pct.clamp(0.0, 100.0);
+                        editor.range = fill_range_to_share(&editor.ranking, editor.slider_pct / 100.0);
+                    } else if drag.changed() && (drag.has_focus() || drag.dragged()) {
+                        editor.slider_pct = typed.clamp(0.0, 100.0);
+                        editor.range = fill_range_to_share(&editor.ranking, editor.slider_pct / 100.0);
+                    }
+                });
+
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    ui.checkbox(&mut editor.lock, "Lock");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button("Отмена").clicked() {
                             cancel = true;
                         }
                         if ui.button("OK").clicked() {
+                            editor.lock = true;
                             apply = true;
                         }
                     });
@@ -1146,7 +1131,7 @@ impl SolverHand {
             num_players: self.player_count,
             verbose_convergence: false,
             profile: false,
-            algorithm: resolve_algorithm(self.algorithm, self.player_count),
+            algorithm: cfr_for_players(self.player_count),
             rank_cache_strict: false,
             locked_ranges: self.locked_ranges.clone(),
         })
@@ -1231,42 +1216,16 @@ impl SolverHand {
 
 const PARAM_FIELD_WIDTH: f32 = 70.0;
 
-fn algorithm_label(algorithm: Algorithm) -> &'static str {
-    match algorithm {
-        Algorithm::FictitiousPlay => "Fictitious Play (fast)",
-        Algorithm::Cfr => "CFR HU",
-        Algorithm::Cfr3Max => "CFR 3-max",
-        Algorithm::Cfr4Max => "CFR 4-max",
-        Algorithm::Cfr5Max => "CFR 5-max",
-        Algorithm::Cfr6Max => "CFR 6-max",
-        Algorithm::Cfr7Max => "CFR 7-max",
-        Algorithm::Cfr8Max => "CFR 8-max",
-        Algorithm::Cfr9Max => "CFR 9-max",
-    }
-}
-
-fn resolve_algorithm(selected: Algorithm, player_count: usize) -> Algorithm {
-    match (selected, player_count) {
-        (_, 9) => Algorithm::Cfr9Max,
-        (_, 8) => Algorithm::Cfr8Max,
-        (_, 7) => Algorithm::Cfr7Max,
-        (_, 6) => Algorithm::Cfr6Max,
-        (_, 5) => Algorithm::Cfr5Max,
-        (_, 4) => Algorithm::Cfr4Max,
-        (Algorithm::FictitiousPlay, _) => Algorithm::FictitiousPlay,
-        (Algorithm::Cfr, 3) => Algorithm::Cfr3Max,
-        (Algorithm::Cfr3Max, 2) => Algorithm::Cfr,
-        (Algorithm::Cfr5Max, 3) => Algorithm::Cfr3Max,
-        (Algorithm::Cfr5Max, 2) => Algorithm::Cfr,
-        (Algorithm::Cfr6Max, 3) => Algorithm::Cfr3Max,
-        (Algorithm::Cfr6Max, 2) => Algorithm::Cfr,
-        (Algorithm::Cfr7Max, 3) => Algorithm::Cfr3Max,
-        (Algorithm::Cfr7Max, 2) => Algorithm::Cfr,
-        (Algorithm::Cfr8Max, 3) => Algorithm::Cfr3Max,
-        (Algorithm::Cfr8Max, 2) => Algorithm::Cfr,
-        (Algorithm::Cfr9Max, 3) => Algorithm::Cfr3Max,
-        (Algorithm::Cfr9Max, 2) => Algorithm::Cfr,
-        (algorithm, _) => algorithm,
+fn cfr_for_players(player_count: usize) -> Algorithm {
+    match player_count {
+        2 => Algorithm::Cfr,
+        4 => Algorithm::Cfr4Max,
+        5 => Algorithm::Cfr5Max,
+        6 => Algorithm::Cfr6Max,
+        7 => Algorithm::Cfr7Max,
+        8 => Algorithm::Cfr8Max,
+        9 => Algorithm::Cfr9Max,
+        _ => Algorithm::Cfr3Max,
     }
 }
 
@@ -1569,44 +1528,19 @@ mod tests {
         assert_eq!(input.big_blind, 100.0);
         assert_eq!(input.max_iterations, 200);
         assert!((input.tolerance - 0.001).abs() < 1e-12);
-        assert_eq!(input.algorithm, Algorithm::FictitiousPlay);
+        assert_eq!(input.algorithm, Algorithm::Cfr3Max);
     }
 
     #[test]
-    fn resolve_algorithm_maps_by_player_count() {
-        assert_eq!(resolve_algorithm(Algorithm::Cfr3Max, 2), Algorithm::Cfr);
-        assert_eq!(resolve_algorithm(Algorithm::Cfr, 3), Algorithm::Cfr3Max);
-        assert_eq!(resolve_algorithm(Algorithm::Cfr3Max, 3), Algorithm::Cfr3Max);
-        assert_eq!(
-            resolve_algorithm(Algorithm::FictitiousPlay, 4),
-            Algorithm::Cfr4Max
-        );
-        assert_eq!(resolve_algorithm(Algorithm::Cfr4Max, 4), Algorithm::Cfr4Max);
-        assert_eq!(resolve_algorithm(Algorithm::Cfr5Max, 5), Algorithm::Cfr5Max);
-        assert_eq!(
-            resolve_algorithm(Algorithm::FictitiousPlay, 5),
-            Algorithm::Cfr5Max
-        );
-        assert_eq!(resolve_algorithm(Algorithm::Cfr6Max, 6), Algorithm::Cfr6Max);
-        assert_eq!(
-            resolve_algorithm(Algorithm::FictitiousPlay, 6),
-            Algorithm::Cfr6Max
-        );
-        assert_eq!(resolve_algorithm(Algorithm::Cfr7Max, 7), Algorithm::Cfr7Max);
-        assert_eq!(
-            resolve_algorithm(Algorithm::FictitiousPlay, 7),
-            Algorithm::Cfr7Max
-        );
-        assert_eq!(resolve_algorithm(Algorithm::Cfr8Max, 8), Algorithm::Cfr8Max);
-        assert_eq!(
-            resolve_algorithm(Algorithm::FictitiousPlay, 8),
-            Algorithm::Cfr8Max
-        );
-        assert_eq!(resolve_algorithm(Algorithm::Cfr9Max, 9), Algorithm::Cfr9Max);
-        assert_eq!(
-            resolve_algorithm(Algorithm::FictitiousPlay, 9),
-            Algorithm::Cfr9Max
-        );
+    fn cfr_for_players_matches_table_size() {
+        assert_eq!(cfr_for_players(2), Algorithm::Cfr);
+        assert_eq!(cfr_for_players(3), Algorithm::Cfr3Max);
+        assert_eq!(cfr_for_players(4), Algorithm::Cfr4Max);
+        assert_eq!(cfr_for_players(5), Algorithm::Cfr5Max);
+        assert_eq!(cfr_for_players(6), Algorithm::Cfr6Max);
+        assert_eq!(cfr_for_players(7), Algorithm::Cfr7Max);
+        assert_eq!(cfr_for_players(8), Algorithm::Cfr8Max);
+        assert_eq!(cfr_for_players(9), Algorithm::Cfr9Max);
     }
 
     #[test]
