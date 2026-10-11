@@ -191,91 +191,101 @@ impl SolverTab {
         let mut start_calc = false;
         let active_is_hand = matches!(self.tabs.get(self.active), Some(WorkspaceTab::Hand(_)));
 
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(4.0, 0.0);
-            ui.set_height(32.0);
-            if active_is_hand {
-                if ui
-                    .selectable_label(self.settings_open, "Настройки")
-                    .on_hover_text("Показать или скрыть панель настроек")
-                    .clicked()
-                {
-                    self.settings_open = !self.settings_open;
-                }
-
-                let has_result = self.active_hand().is_some_and(|hand| hand.result.is_some());
-                let computing = self.active_hand().is_some_and(|hand| hand.computing);
-                let calc_label = self
-                    .active_hand()
-                    .map(SolverHand::calc_button_label)
-                    .unwrap_or("Рассчитать");
-                if has_result {
+        let control_h = 24.0;
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), control_h),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(4.0, 0.0);
+                ui.set_height(control_h);
+                if active_is_hand {
                     if ui
-                        .add_enabled(!computing, egui::Button::new(calc_label))
+                        .selectable_label(self.settings_open, "Настройки")
+                        .on_hover_text("Показать или скрыть панель настроек")
                         .clicked()
                     {
-                        start_calc = true;
+                        self.settings_open = !self.settings_open;
                     }
-                }
-                if computing {
-                    ui.spinner();
-                }
-                if let Some(error) = self.active_hand().and_then(|hand| hand.error.as_ref()) {
-                    ui.add(
-                        egui::Label::new(RichText::new(error).color(egui::Color32::RED).small())
-                            .truncate(),
-                    )
-                    .on_hover_text(error);
-                }
-                ui.separator();
-            }
-            let tabs_width = (ui.available_width() - 72.0).max(80.0);
 
-            egui::ScrollArea::horizontal()
-                .id_salt("solver_hand_tab_scroll")
-                .max_width(tabs_width)
-                .auto_shrink([true, true])
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing = egui::vec2(4.0, 0.0);
-                        ui.set_height(32.0);
-                        for (index, tab) in self.tabs.iter().enumerate() {
-                            let title = tab.tab_title();
-                            let is_import = tab.is_import();
-                            let (clicked, closed, middle) = draw_workspace_tab(
-                                ui,
-                                &title,
-                                index == self.active,
-                                tab.is_computing(),
-                                is_import,
-                            );
-                            if closed || middle {
-                                close = Some(index);
-                            } else if clicked {
-                                select = Some(index);
-                            }
+                    let has_result = self.active_hand().is_some_and(|hand| hand.result.is_some());
+                    let computing = self.active_hand().is_some_and(|hand| hand.computing);
+                    let calc_label = self
+                        .active_hand()
+                        .map(SolverHand::calc_button_label)
+                        .unwrap_or("Рассчитать");
+                    if has_result {
+                        if ui
+                            .add_enabled(!computing, egui::Button::new(calc_label))
+                            .clicked()
+                        {
+                            start_calc = true;
                         }
-                    });
-                });
+                    }
+                    if computing {
+                        ui.spinner();
+                    }
+                    if let Some(error) = self.active_hand().and_then(|hand| hand.error.as_ref()) {
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(error).color(egui::Color32::RED).small(),
+                            )
+                            .truncate(),
+                        )
+                        .on_hover_text(error);
+                    }
+                    ui.separator();
+                }
+                let tabs_width = (ui.available_width() - 72.0).max(80.0);
 
-            let add_response = ui.add_sized(
-                [24.0, 22.0],
-                egui::Button::new(RichText::new("+").size(18.0)),
-            );
-            if add_response.on_hover_text("Новая раздача").clicked() {
-                add = true;
-            }
-            let import_response = ui.add_sized(
-                [28.0, 22.0],
-                egui::Button::new(RichText::new("📂").size(14.0)),
-            );
-            if import_response
-                .on_hover_text("Загрузить файлы истории рук")
-                .clicked()
-            {
-                import = true;
-            }
-        });
+                egui::ScrollArea::horizontal()
+                    .id_salt("solver_hand_tab_scroll")
+                    .max_width(tabs_width)
+                    .max_height(control_h)
+                    .auto_shrink([true, false])
+                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
+                    .show(ui, |ui| {
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            ui.set_height(control_h);
+                            ui.spacing_mut().item_spacing = egui::vec2(4.0, 0.0);
+                            for (index, tab) in self.tabs.iter().enumerate() {
+                                let title = tab.tab_title();
+                                let is_import = tab.is_import();
+                                let (clicked, closed, middle) = draw_workspace_tab(
+                                    ui,
+                                    &title,
+                                    index == self.active,
+                                    tab.is_computing(),
+                                    is_import,
+                                    control_h,
+                                );
+                                if closed || middle {
+                                    close = Some(index);
+                                } else if clicked {
+                                    select = Some(index);
+                                }
+                            }
+                        });
+                    });
+
+                let add_response = ui.add_sized(
+                    [control_h, control_h],
+                    egui::Button::new(RichText::new("+").size(16.0)),
+                );
+                if add_response.on_hover_text("Новая раздача").clicked() {
+                    add = true;
+                }
+                let import_response = ui.add_sized(
+                    [control_h, control_h],
+                    egui::Button::new(RichText::new("📂").size(13.0)),
+                );
+                if import_response
+                    .on_hover_text("Загрузить файлы истории рук")
+                    .clicked()
+                {
+                    import = true;
+                }
+            },
+        );
 
         if let Some(index) = select {
             self.active = index;
@@ -1397,6 +1407,7 @@ fn draw_workspace_tab(
     selected: bool,
     computing: bool,
     is_import: bool,
+    height: f32,
 ) -> (bool, bool, bool) {
     let mut close_clicked = false;
     let mut close_contains = false;
@@ -1411,16 +1422,11 @@ fn draw_workspace_tab(
     } else {
         visuals.weak_text_color()
     };
-    let rounding = egui::Rounding {
-        nw: 5.0,
-        ne: 5.0,
-        sw: 0.0,
-        se: 0.0,
-    };
-    let font_size = if is_import { 15.0 } else { 13.0 };
-    let tab_height = if is_import { 26.0 } else { 20.0 };
-    let h_margin = if is_import { 14.0 } else { 8.0 };
-    let v_margin = if is_import { 7.0 } else { 4.0 };
+    let rounding = egui::Rounding::same(5.0);
+    let font_size = if is_import { 14.0 } else { 13.0 };
+    let v_margin = 3.0;
+    let h_margin = if is_import { 12.0 } else { 8.0 };
+    let inner_h = (height - v_margin * 2.0).max(16.0);
 
     let inner = egui::Frame::none()
         .fill(fill)
@@ -1428,8 +1434,8 @@ fn draw_workspace_tab(
         .inner_margin(egui::Margin::symmetric(h_margin, v_margin))
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing = egui::vec2(6.0, 0.0);
-            ui.horizontal(|ui| {
-                ui.set_height(tab_height);
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.set_height(inner_h);
                 if is_import {
                     ui.set_min_width(96.0);
                 }
@@ -1445,10 +1451,14 @@ fn draw_workspace_tab(
                         .selectable(false),
                 );
                 let close = ui.add(
-                    egui::Button::new(RichText::new("×").size(if is_import { 16.0 } else { 14.0 }).color(text_color))
-                        .frame(false)
-                        .sense(egui::Sense::click())
-                        .min_size(egui::vec2(if is_import { 20.0 } else { 18.0 }, 18.0)),
+                    egui::Button::new(
+                        RichText::new("×")
+                            .size(if is_import { 15.0 } else { 14.0 })
+                            .color(text_color),
+                    )
+                    .frame(false)
+                    .sense(egui::Sense::click())
+                    .min_size(egui::vec2(16.0, inner_h)),
                 );
                 close_contains = close.hovered() || close.contains_pointer();
                 if close.on_hover_text("Закрыть").clicked() {

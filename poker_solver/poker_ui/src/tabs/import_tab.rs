@@ -4,9 +4,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
-use egui::{Color32, Context, FontId, RichText, Sense, Ui};
+use egui::popup::PopupCloseBehavior;
+use egui::{Align2, Color32, Context, FontId, RichText, Sense, Stroke, Ui};
 use poker_core::{
-    parse_hand_histories, solve, solver_seat_label, table_position_label, Algorithm, EquityCache,
+    eight_node, five_node, nine_node, parse_hand_histories, seven_node, six_node, solve,
+    solver_position_index, solver_seat_label, table_position_label, Algorithm, EquityCache,
     HeroActionKind, ImportedHand, SolverInput, SolverOutput,
 };
 
@@ -25,9 +27,11 @@ const ROW_BG: Color32 = Color32::WHITE;
 const TEXT: Color32 = Color32::from_rgb(32, 32, 32);
 const GREEN: Color32 = Color32::from_rgb(46, 160, 67);
 const RED: Color32 = Color32::from_rgb(200, 60, 60);
-const YELLOW: Color32 = Color32::from_rgb(196, 150, 40);
 const GRID: Color32 = Color32::from_rgb(176, 192, 208);
 const ROW_H: f32 = 22.0;
+const PRIZE_SLOTS: usize = 9;
+const WARN_YELLOW: Color32 = Color32::from_rgb(255, 196, 0);
+const MISTAKE_RED: Color32 = Color32::from_rgb(204, 48, 48);
 
 pub struct ImportTab {
     id: u64,
@@ -61,6 +65,7 @@ struct ImportedTournament {
 struct HandRow {
     hand: ImportedHand,
     analysis: Option<HandAnalysis>,
+    reviewed: bool,
 }
 
 #[derive(Clone)]
@@ -80,6 +85,13 @@ enum Verdict {
     Mistake,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DiffMark {
+    None,
+    Excluded,
+    Scored(Verdict),
+}
+
 #[derive(Clone)]
 struct AnalyzeSettings {
     prizes: Vec<(f64, f64)>,
@@ -95,13 +107,34 @@ struct AnalyzeModal {
     hand_index: Option<usize>,
     prizes: Vec<(String, String)>,
     prize_pool: f64,
+    prizes_total: String,
     places_paid: String,
     total_chips: String,
+    bounty_mode: BountyMode,
     warning: f32,
     mistake: f32,
-    max_bb: String,
+    max_bb: f32,
     fold_allin_blinds: bool,
     multithread: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BountyMode {
+    Off,
+    Regular,
+    Progressive,
+}
+
+impl BountyMode {
+    const ALL: [Self; 3] = [Self::Off, Self::Regular, Self::Progressive];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::Regular => "Regular",
+            Self::Progressive => "Progressive",
+        }
+    }
 }
 
 enum AnalyzeMessage {
@@ -250,6 +283,7 @@ impl ImportTab {
                             .get_mut(tournament)
                             .and_then(|t| t.hands.get_mut(hand))
                         {
+                            row.reviewed = true;
                             row.analysis = analysis;
                         }
                     }
@@ -380,6 +414,7 @@ impl ImportTab {
                 hands: vec![HandRow {
                     hand,
                     analysis: None,
+                    reviewed: false,
                 }],
             });
             return true;
@@ -399,6 +434,7 @@ impl ImportTab {
         existing.hands.push(HandRow {
             hand,
             analysis: None,
+            reviewed: false,
         });
         true
     }
@@ -443,7 +479,7 @@ impl ImportTab {
                         &cols,
                         &values,
                         index == self.selected_tournament,
-                        None,
+                        DiffMark::None,
                     );
                     if response.clicked() || response.secondary_clicked() {
                         select = Some(index);
@@ -522,8 +558,12 @@ impl ImportTab {
                         players.as_str(),
                         hand.level_label.as_str(),
                     ];
-                    let verdict = row.analysis.as_ref().map(|a| a.verdict);
-                    let response = draw_row(ui, &cols, &values, index == selected, verdict);
+                    let mark = match (&row.analysis, row.reviewed) {
+                        (Some(analysis), _) => DiffMark::Scored(analysis.verdict),
+                        (None, true) => DiffMark::Excluded,
+                        (None, false) => DiffMark::None,
+                    };
+                    let response = draw_row(ui, &cols, &values, index == selected, mark);
                     if response.clicked() || response.secondary_clicked() {
                         select = Some(index);
                     }
@@ -564,10 +604,15 @@ impl ImportTab {
             ui.label("Выберите руку в списке.");
             return;
         };
+        let reviewed = row.reviewed;
         let Some(analysis) = row.analysis.clone() else {
             ui.vertical_centered(|ui| {
                 ui.add_space(24.0);
-                ui.label("Правый клик по турниру → Quick Analyze, чтобы рассчитать руки.");
+                ui.label(if reviewed {
+                    "Спот не подходит под push/fold — расчёт не выполняется."
+                } else {
+                    "Правый клик по турниру → Quick Analyze, чтобы рассчитать руки."
+                });
             });
             return;
         };
@@ -641,7 +686,7 @@ impl ImportTab {
         for (index, name, stack, stack_bb, action) in rows {
             let label = table_position_label(n, index);
             let values = [label, name, stack.as_str(), stack_bb.as_str(), action];
-            draw_row(ui, &cols, &values, name == hand.hero_name, None);
+            draw_row(ui, &cols, &values, name == hand.hero_name, DiffMark::None);
         }
     }
 
@@ -651,26 +696,36 @@ impl ImportTab {
         };
         let start_players = tournament.start_players.max(2);
         let prize_pool = tournament.buy_in * start_players as f64;
-        let (pcts, places) = if start_players <= 3 {
-            (vec![65.0, 35.0], 2)
+        let pcts = if start_players <= 3 {
+            vec![65.0, 35.0]
         } else {
-            (vec![50.0, 30.0, 20.0], 3)
+            vec![50.0, 30.0, 20.0]
         };
         let prizes = if let Some(settings) = &self.last_settings {
-            settings
-                .prizes
-                .iter()
-                .map(|(dollars, pct)| (format!("{dollars:.2}"), format!("{pct:.1}")))
-                .collect()
+            pad_prize_rows(
+                settings
+                    .prizes
+                    .iter()
+                    .map(|(dollars, pct)| {
+                        if *dollars == 0.0 && *pct == 0.0 {
+                            (String::new(), String::new())
+                        } else {
+                            (format!("{dollars:.1}"), format!("{pct:.1}"))
+                        }
+                    })
+                    .collect(),
+            )
         } else {
-            pcts.iter()
-                .map(|pct| {
-                    (
-                        format!("{:.2}", prize_pool * pct / 100.0),
-                        format!("{pct:.1}"),
-                    )
-                })
-                .collect()
+            pad_prize_rows(
+                pcts.iter()
+                    .map(|pct| {
+                        (
+                            format!("{:.1}", prize_pool * pct / 100.0),
+                            format!("{pct:.1}"),
+                        )
+                    })
+                    .collect(),
+            )
         };
         let start_stack = tournament
             .hands
@@ -678,19 +733,24 @@ impl ImportTab {
             .and_then(|row| row.hand.hero_stack())
             .unwrap_or(1500.0);
         let settings = self.last_settings.clone();
+        let paid = prizes
+            .iter()
+            .filter(|(dollars, pct)| !dollars.trim().is_empty() || !pct.trim().is_empty())
+            .count()
+            .max(1);
+        let prizes_total = prize_dollar_sum(&prizes);
         self.analyze_modal = Some(AnalyzeModal {
             tournament_index,
             hand_index,
             prizes,
             prize_pool,
-            places_paid: places.to_string(),
+            prizes_total: format!("{prizes_total:.1}"),
+            places_paid: paid.to_string(),
             total_chips: format!("{:.0}", start_stack * start_players as f64),
+            bounty_mode: BountyMode::Off,
             warning: settings.as_ref().map(|s| s.warning as f32).unwrap_or(0.10),
             mistake: settings.as_ref().map(|s| s.mistake as f32).unwrap_or(0.10),
-            max_bb: settings
-                .as_ref()
-                .map(|s| format!("{:.0}", s.max_bb))
-                .unwrap_or_else(|| "15".into()),
+            max_bb: settings.as_ref().map(|s| s.max_bb as f32).unwrap_or(15.0),
             fold_allin_blinds: settings
                 .as_ref()
                 .map(|s| s.fold_allin_blinds)
@@ -703,94 +763,60 @@ impl ImportTab {
         let Some(mut modal) = self.analyze_modal.take() else {
             return;
         };
+        let screen = ctx.screen_rect();
+        egui::Area::new(egui::Id::new("qa_modal_dim"))
+            .order(egui::Order::Middle)
+            .fixed_pos(screen.min)
+            .interactable(true)
+            .show(ctx, |ui| {
+                let (rect, _) = ui.allocate_exact_size(screen.size(), Sense::click());
+                ui.painter()
+                    .rect_filled(rect, 0.0, Color32::from_black_alpha(90));
+            });
+
         let mut open = true;
         let mut confirmed = false;
         let mut cancelled = false;
         egui::Window::new("Quick Analyze Settings")
+            .id(egui::Id::new("qa_settings_window"))
+            .order(egui::Order::Foreground)
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .anchor(Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .default_size(egui::vec2(572.0, 410.0))
             .show(ctx, |ui| {
-                ui.label(RichText::new("ICM Prizes").strong());
-                egui::Grid::new("qa_prizes")
-                    .num_columns(3)
-                    .spacing(egui::vec2(8.0, 4.0))
-                    .show(ui, |ui| {
-                        ui.label("Place");
-                        ui.label("Prize($)");
-                        ui.label("%");
-                        ui.end_row();
-                        for (index, (dollars, pct)) in modal.prizes.iter_mut().enumerate() {
-                            ui.label(format!("{}", index + 1));
-                            let dollar_edit = ui.add(
-                                egui::TextEdit::singleline(dollars).desired_width(80.0),
-                            );
-                            let pct_edit =
-                                ui.add(egui::TextEdit::singleline(pct).desired_width(60.0));
-                            if pct_edit.changed() {
-                                if let Ok(value) = pct.trim().parse::<f64>() {
-                                    *dollars = format!("{:.2}", modal.prize_pool * value / 100.0);
-                                }
-                            } else if dollar_edit.changed() && modal.prize_pool > 0.0 {
-                                if let Ok(value) = dollars.trim().parse::<f64>() {
-                                    *pct = format!("{:.1}", value / modal.prize_pool * 100.0);
-                                }
-                            }
-                            ui.end_row();
-                        }
+                ui.set_min_width(546.0);
+                ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
+                ui.horizontal(|ui| {
+                    win_group_box(ui, "ICM Prizes", egui::vec2(292.0, 318.0), |ui| {
+                        modal.draw_icm_prizes(ui);
                     });
-                ui.horizontal(|ui| {
-                    ui.label("Places Paid");
-                    let paid_edit =
-                        ui.add(egui::TextEdit::singleline(&mut modal.places_paid).desired_width(40.0));
-                    if paid_edit.changed() {
-                        if let Ok(n) = modal.places_paid.trim().parse::<usize>() {
-                            let n = n.clamp(1, 9);
-                            while modal.prizes.len() < n {
-                                modal.prizes.push(("0.00".into(), "0.0".into()));
-                            }
-                            modal.prizes.truncate(n);
-                        }
-                    }
-                    ui.label("Total Chips");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut modal.total_chips).desired_width(80.0),
-                    );
-                    ui.label("Reentry Mode  Off");
+                    win_group_box(ui, "Options", egui::vec2(246.0, 318.0), |ui| {
+                        modal.draw_options(ui);
+                    });
                 });
-                ui.separator();
-                ui.label(RichText::new("Options").strong());
-                ui.horizontal(|ui| {
-                    ui.label("EQDiff% Warning");
-                    ui.add(egui::Slider::new(&mut modal.warning, 0.0..=2.0).max_decimals(2));
-                });
-                ui.horizontal(|ui| {
-                    ui.label("EQDiff% Mistake");
-                    ui.add(egui::Slider::new(&mut modal.mistake, 0.0..=2.0).max_decimals(2));
-                });
-                ui.separator();
-                ui.label(RichText::new("Filters").strong());
-                ui.horizontal(|ui| {
-                    ui.label("Max. effective BBs");
-                    ui.add(egui::TextEdit::singleline(&mut modal.max_bb).desired_width(50.0));
-                });
-                ui.checkbox(&mut modal.fold_allin_blinds, "Fold all-in Blinds");
-                ui.separator();
-                ui.label(RichText::new("Performance").strong());
-                ui.checkbox(&mut modal.multithread, "Use Multi-Threading");
-                ui.separator();
-                ui.horizontal(|ui| {
-                    if ui.button("OK").clicked() {
-                        confirmed = true;
-                    }
-                    if ui.button("Cancel").clicked() {
+                ui.add_space(4.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add_sized(egui::vec2(80.0, 26.0), egui::Button::new("Cancel"))
+                        .clicked()
+                    {
                         cancelled = true;
+                    }
+                    ui.add_space(6.0);
+                    if ui
+                        .add_sized(egui::vec2(80.0, 26.0), egui::Button::new("OK"))
+                        .clicked()
+                    {
+                        confirmed = true;
                     }
                 });
             });
 
         if confirmed {
+            modal.apply_places_paid();
+            modal.apply_prizes_total();
             match modal.to_settings() {
                 Ok(settings) => {
                     self.last_settings = Some(settings.clone());
@@ -924,6 +950,9 @@ impl AnalyzeModal {
     fn to_settings(&self) -> Result<AnalyzeSettings, String> {
         let mut prizes = Vec::new();
         for (dollars, pct) in &self.prizes {
+            if dollars.trim().is_empty() && pct.trim().is_empty() {
+                continue;
+            }
             let dollars = dollars
                 .trim()
                 .parse::<f64>()
@@ -932,24 +961,415 @@ impl AnalyzeModal {
                 .trim()
                 .parse::<f64>()
                 .map_err(|_| format!("некорректный % {pct}"))?;
+            if dollars == 0.0 && pct == 0.0 {
+                continue;
+            }
             prizes.push((dollars, pct));
         }
         if prizes.is_empty() {
             return Err("укажите хотя бы одно призовое место".into());
         }
-        let max_bb = self
-            .max_bb
-            .trim()
-            .parse::<f64>()
-            .map_err(|_| format!("некорректный Max. effective BBs: {}", self.max_bb))?;
         Ok(AnalyzeSettings {
             prizes,
             warning: self.warning.max(0.0) as f64,
-            mistake: self.mistake.max(self.warning) as f64,
-            max_bb,
+            mistake: self.mistake.abs().max(self.warning) as f64,
+            max_bb: self.max_bb.max(1.0) as f64,
             fold_allin_blinds: self.fold_allin_blinds,
             multithread: self.multithread,
         })
+    }
+
+    fn draw_icm_prizes(&mut self, ui: &mut Ui) {
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.set_width(32.0);
+                ui.spacing_mut().item_spacing = egui::vec2(0.0, 3.0);
+                self.draw_prize_toolbar(ui);
+            });
+            ui.add_space(6.0);
+            ui.vertical(|ui| {
+                self.draw_prize_table(ui);
+                ui.add_space(8.0);
+                self.draw_prize_summary(ui);
+            });
+        });
+    }
+
+    fn draw_prize_toolbar(&mut self, ui: &mut Ui) {
+        let new_btn = toolbar_icon_button(ui, "New prize structure", |painter, rect| {
+            paint_doc_icon(painter, rect);
+            let tip = rect.right_bottom() - egui::vec2(1.0, 2.0);
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    tip + egui::vec2(-5.0, -1.0),
+                    tip + egui::vec2(1.0, -1.0),
+                    tip + egui::vec2(-2.0, 3.0),
+                ],
+                painter.ctx().style().visuals.text_color(),
+                Stroke::NONE,
+            ));
+        });
+        let popup_id = ui.make_persistent_id("qa_prize_presets");
+        if new_btn.clicked() {
+            ui.memory_mut(|mem| mem.toggle_popup(popup_id));
+        }
+        egui::popup::popup_below_widget(
+            ui,
+            popup_id,
+            &new_btn,
+            PopupCloseBehavior::CloseOnClick,
+            |ui| {
+                ui.set_min_width(168.0);
+                if ui.button("SNG  50 / 30 / 20").clicked() {
+                    self.apply_preset(&[50.0, 30.0, 20.0]);
+                }
+                if ui.button("Heads-Up  65 / 35").clicked() {
+                    self.apply_preset(&[65.0, 35.0]);
+                }
+                if ui.button("Winner Take All").clicked() {
+                    self.apply_preset(&[100.0]);
+                }
+                if ui.button("Clear").clicked() {
+                    self.apply_preset(&[]);
+                    if let Some(first) = self.prizes.first_mut() {
+                        *first = ("0.0".into(), "0.0".into());
+                    }
+                    self.places_paid = "1".into();
+                }
+            },
+        );
+
+        if toolbar_icon_button(ui, "Open prize structure", paint_folder_icon).clicked() {
+            self.load_prizes();
+        }
+        if toolbar_icon_button(ui, "Save prize structure", paint_save_icon).clicked() {
+            self.save_prizes();
+        }
+        if toolbar_icon_button(ui, "Copy prize structure", paint_copy_icon).clicked() {
+            self.copy_prizes();
+        }
+    }
+
+    fn draw_prize_table(&mut self, ui: &mut Ui) {
+        if self.prizes.len() != PRIZE_SLOTS {
+            self.prizes = pad_prize_rows(std::mem::take(&mut self.prizes));
+        }
+        let cols = [28.0, 92.0, 68.0];
+        let total_w = cols.iter().sum::<f32>();
+        let header_h = 22.0;
+        let (header, _) = ui.allocate_exact_size(egui::vec2(total_w, header_h), Sense::hover());
+        let header_fill = ui.visuals().widgets.inactive.bg_fill;
+        let grid = ui.visuals().widgets.noninteractive.bg_stroke.color;
+        ui.painter().rect_filled(header, 0.0, header_fill);
+        let font = FontId::proportional(12.0);
+        let color = ui.visuals().text_color();
+        let labels = ["", "Prize ($)", "%"];
+        let mut x = header.left();
+        for (label, width) in labels.iter().zip(cols.iter()) {
+            ui.painter().text(
+                egui::pos2(x + *width * 0.5, header.center().y),
+                Align2::CENTER_CENTER,
+                *label,
+                font.clone(),
+                color,
+            );
+            x += *width;
+        }
+        draw_table_grid(ui, header, &cols, grid);
+
+        let body_h = ROW_H * 7.0;
+        let pool = self.prize_pool;
+        let mut pct_changed = false;
+        let mut dollar_changed = false;
+        egui::ScrollArea::vertical()
+            .id_salt("qa_prize_scroll")
+            .max_height(body_h)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+                for index in 0..PRIZE_SLOTS {
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(total_w, ROW_H), Sense::hover());
+                    ui.painter()
+                        .rect_filled(rect, 0.0, ui.visuals().extreme_bg_color);
+                    ui.painter().text(
+                        egui::pos2(rect.left() + cols[0] * 0.5, rect.center().y),
+                        Align2::CENTER_CENTER,
+                        format!("{}", index + 1),
+                        font.clone(),
+                        color,
+                    );
+                    let (dollars, pct) = &mut self.prizes[index];
+                    let dollar_rect = egui::Rect::from_min_size(
+                        egui::pos2(rect.left() + cols[0] + 2.0, rect.top() + 1.0),
+                        egui::vec2(cols[1] - 4.0, ROW_H - 2.0),
+                    );
+                    let pct_rect = egui::Rect::from_min_size(
+                        egui::pos2(rect.left() + cols[0] + cols[1] + 2.0, rect.top() + 1.0),
+                        egui::vec2(cols[2] - 4.0, ROW_H - 2.0),
+                    );
+                    let dollar_edit = ui.put(
+                        dollar_rect,
+                        egui::TextEdit::singleline(dollars)
+                            .frame(false)
+                            .horizontal_align(egui::Align::Center)
+                            .margin(egui::vec2(4.0, 2.0))
+                            .id(ui.id().with("qa_dollar").with(index)),
+                    );
+                    let pct_edit = ui.put(
+                        pct_rect,
+                        egui::TextEdit::singleline(pct)
+                            .frame(false)
+                            .horizontal_align(egui::Align::Center)
+                            .margin(egui::vec2(4.0, 2.0))
+                            .id(ui.id().with("qa_pct").with(index)),
+                    );
+                    if pct_edit.changed() {
+                        if let Ok(value) = pct.trim().parse::<f64>() {
+                            *dollars = if value == 0.0 {
+                                String::new()
+                            } else {
+                                format!("{:.1}", pool * value / 100.0)
+                            };
+                        }
+                        pct_changed = true;
+                    } else if dollar_edit.changed() && pool > 0.0 {
+                        if let Ok(value) = dollars.trim().parse::<f64>() {
+                            *pct = if value == 0.0 {
+                                String::new()
+                            } else {
+                                format!("{:.1}", value / pool * 100.0)
+                            };
+                        }
+                        dollar_changed = true;
+                    }
+                    draw_table_grid(ui, rect, &cols, grid);
+                    ui.painter().rect_stroke(rect, 0.0, Stroke::new(1.0_f32, grid));
+                }
+            });
+        if pct_changed || dollar_changed {
+            self.refresh_totals();
+        }
+    }
+
+    fn draw_prize_summary(&mut self, ui: &mut Ui) {
+        let field_w = 108.0;
+        egui::Grid::new("qa_icm_summary")
+            .num_columns(2)
+            .spacing(egui::vec2(10.0, 4.0))
+            .min_col_width(88.0)
+            .show(ui, |ui| {
+                ui.label("Places Paid");
+                let paid = ui.add(
+                    egui::TextEdit::singleline(&mut self.places_paid)
+                        .desired_width(field_w)
+                        .horizontal_align(egui::Align::Center),
+                );
+                ui.end_row();
+                ui.label("Prizes($)");
+                let total = ui.add(
+                    egui::TextEdit::singleline(&mut self.prizes_total)
+                        .desired_width(field_w)
+                        .horizontal_align(egui::Align::Center),
+                );
+                ui.end_row();
+                ui.label("Total Chips");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.total_chips)
+                        .desired_width(field_w)
+                        .horizontal_align(egui::Align::Center),
+                );
+                ui.end_row();
+                ui.label("Bounty Mode");
+                egui::ComboBox::from_id_salt("qa_bounty_mode")
+                    .selected_text(self.bounty_mode.label())
+                    .width(field_w)
+                    .show_ui(ui, |ui| {
+                        for mode in BountyMode::ALL {
+                            ui.selectable_value(&mut self.bounty_mode, mode, mode.label());
+                        }
+                    });
+                ui.end_row();
+
+                if paid.lost_focus() {
+                    self.apply_places_paid();
+                }
+                if total.lost_focus() {
+                    self.apply_prizes_total();
+                }
+            });
+    }
+
+    fn draw_options(&mut self, ui: &mut Ui) {
+        ui.label("EQDiff% Warning:");
+        ui.horizontal(|ui| {
+            paint_warning_icon(ui, 18.0);
+            ui.spacing_mut().slider_width = (ui.available_width() - 56.0).max(80.0);
+            ui.add(
+                egui::Slider::new(&mut self.warning, 0.0..=1.0)
+                    .show_value(false)
+                    .max_decimals(2)
+                    .handle_shape(egui::style::HandleShape::Rect { aspect_ratio: 0.42 }),
+            );
+            ui.label(format!("{:+.2}", self.warning));
+        });
+        ui.add_space(8.0);
+        ui.label("EQDiff% Mistake:");
+        ui.horizontal(|ui| {
+            paint_mistake_icon(ui, 18.0);
+            ui.spacing_mut().slider_width = (ui.available_width() - 56.0).max(80.0);
+            let mut mistake = -self.mistake;
+            let slider = ui.add(
+                egui::Slider::new(&mut mistake, -1.0..=0.0)
+                    .show_value(false)
+                    .max_decimals(2)
+                    .handle_shape(egui::style::HandleShape::Rect { aspect_ratio: 0.42 }),
+            );
+            if slider.changed() {
+                self.mistake = -mistake;
+            }
+            ui.label(format!("{:+.2}", -self.mistake));
+        });
+        ui.add_space(14.0);
+        ui.label(RichText::new("Filters").strong());
+        ui.horizontal(|ui| {
+            ui.label("Max. effective BB:");
+            ui.add(
+                egui::DragValue::new(&mut self.max_bb)
+                    .range(1.0..=200.0)
+                    .speed(1.0)
+                    .max_decimals(0),
+            );
+        });
+        ui.checkbox(&mut self.fold_allin_blinds, "Strict all-in filter");
+        ui.add_space(10.0);
+        ui.label(RichText::new("Performance").strong());
+        ui.checkbox(&mut self.multithread, "Use Multi-Threading");
+    }
+
+    fn apply_preset(&mut self, pcts: &[f64]) {
+        self.prizes = pad_prize_rows(
+            pcts.iter()
+                .map(|pct| {
+                    (
+                        format!("{:.1}", self.prize_pool * pct / 100.0),
+                        format!("{pct:.1}"),
+                    )
+                })
+                .collect(),
+        );
+        self.places_paid = pcts.len().max(1).to_string();
+        self.refresh_totals();
+    }
+
+    fn apply_places_paid(&mut self) {
+        let Ok(n) = self.places_paid.trim().parse::<usize>() else {
+            return;
+        };
+        let n = n.clamp(1, PRIZE_SLOTS);
+        self.places_paid = n.to_string();
+        for i in 0..PRIZE_SLOTS {
+            if i >= n {
+                self.prizes[i] = (String::new(), String::new());
+            } else if self.prizes[i].0.trim().is_empty() && self.prizes[i].1.trim().is_empty() {
+                self.prizes[i] = ("0.0".into(), "0.0".into());
+            }
+        }
+        self.refresh_totals();
+    }
+
+    fn apply_prizes_total(&mut self) {
+        let Ok(value) = self.prizes_total.trim().parse::<f64>() else {
+            self.refresh_totals();
+            return;
+        };
+        if value <= 0.0 {
+            self.refresh_totals();
+            return;
+        }
+        self.prize_pool = value;
+        for (dollars, pct) in &mut self.prizes {
+            if let Ok(p) = pct.trim().parse::<f64>() {
+                *dollars = if p == 0.0 {
+                    String::new()
+                } else {
+                    format!("{:.1}", value * p / 100.0)
+                };
+            }
+        }
+        self.refresh_totals();
+    }
+
+    fn refresh_totals(&mut self) {
+        self.prizes_total = format!("{:.1}", prize_dollar_sum(&self.prizes));
+    }
+
+    fn load_prizes(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Prize structure", &["txt"])
+            .set_title("Open Prize Structure")
+            .pick_file()
+        else {
+            return;
+        };
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return;
+        };
+        let mut loaded = Vec::new();
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let parts: Vec<&str> = line
+                .split(|c: char| c == ',' || c == ';' || c == '\t' || c.is_whitespace())
+                .filter(|part| !part.is_empty())
+                .collect();
+            if parts.len() >= 2 {
+                loaded.push((parts[0].to_string(), parts[1].to_string()));
+            } else if let Some(part) = parts.first() {
+                if let Ok(pct) = part.parse::<f64>() {
+                    loaded.push((
+                        format!("{:.1}", self.prize_pool * pct / 100.0),
+                        format!("{pct:.1}"),
+                    ));
+                }
+            }
+        }
+        if loaded.is_empty() {
+            return;
+        }
+        self.prizes = pad_prize_rows(loaded);
+        self.refresh_totals();
+    }
+
+    fn save_prizes(&self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Prize structure", &["txt"])
+            .set_title("Save Prize Structure")
+            .save_file()
+        else {
+            return;
+        };
+        let mut text = String::new();
+        for (dollars, pct) in &self.prizes {
+            if dollars.trim().is_empty() && pct.trim().is_empty() {
+                continue;
+            }
+            text.push_str(&format!("{dollars},{pct}\n"));
+        }
+        let _ = std::fs::write(path, text);
+    }
+
+    fn copy_prizes(&self) {
+        let text = self
+            .prizes
+            .iter()
+            .filter(|(_, pct)| !pct.trim().is_empty())
+            .map(|(_, pct)| pct.clone())
+            .collect::<Vec<_>>()
+            .join("/");
+        let _ = arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text));
     }
 }
 
@@ -969,11 +1389,10 @@ fn analyze_imported_hand(
     let n = hand.players.len();
     let hero_label = solver_seat_label(hero.position, n)?;
     let hero_action = hand.hero_action?;
-    if matches!(hero_action, HeroActionKind::Check) {
+    if !is_push_fold_spot(hand) {
         return None;
     }
 
-    let actions_before = actions_before_hero(hand);
     let facing_shove = hand
         .preflop_actions
         .iter()
@@ -1002,17 +1421,27 @@ fn analyze_imported_hand(
         }
     };
 
-    let tree = build_strategy_tree(&output, input.button_index);
-    let path = find_hero_decision_path(&tree, &actions_before, hero_label)?;
-    let node = node_at_path(&tree, &path)?;
-    let is_raise = matches!(node.action, Action::Raise);
-    let took_action = if is_raise {
+    let spot = if (5..=9).contains(&n) {
+        mask_spot(hand, &output)?
+    } else {
+        let actions_before = actions_before_hero(hand);
+        let tree = build_strategy_tree(&output, input.button_index);
+        let path = find_hero_decision_path(&tree, &actions_before, hero_label)?;
+        let node = node_at_path(&tree, &path)?;
+        Spot {
+            range: node.range,
+            evs: node.ev_range,
+            title: node.label.clone(),
+            is_raise: matches!(node.action, Action::Raise),
+        }
+    };
+    let took_action = if spot.is_raise {
         matches!(hero_action, HeroActionKind::Raise)
     } else {
         matches!(hero_action, HeroActionKind::Call | HeroActionKind::Raise)
     };
-    let freq = node.range[combo].clamp(0.0, 1.0);
-    let diff = if let Some(evs) = node.ev_range {
+    let freq = spot.range[combo].clamp(0.0, 1.0);
+    let diff = if let Some(evs) = spot.evs {
         if took_action {
             evs[combo]
         } else {
@@ -1022,7 +1451,7 @@ fn analyze_imported_hand(
         let signed = if took_action { 1.0 } else { -1.0 };
         signed * (2.0 * freq - 1.0)
     };
-    let verdict = if diff >= -settings.warning {
+    let verdict = if diff > settings.warning {
         Verdict::Correct
     } else if diff >= -settings.mistake {
         Verdict::Warning
@@ -1032,11 +1461,126 @@ fn analyze_imported_hand(
     Some(HandAnalysis {
         diff,
         verdict,
-        range: node.range,
-        evs: node.ev_range,
-        title: node.label.clone(),
+        range: spot.range,
+        evs: spot.evs,
+        title: spot.title,
+        is_raise: spot.is_raise,
+    })
+}
+
+struct Spot {
+    range: [f64; 169],
+    evs: Option<[f64; 169]>,
+    title: String,
+    is_raise: bool,
+}
+
+fn mask_spot(hand: &ImportedHand, output: &SolverOutput) -> Option<Spot> {
+    let n = hand.players.len();
+    let hero = hand.hero_player()?;
+    let hero_seat = solver_position_index(hero.position, n)?;
+    let (mask, shovers) = prior_shove_mask(hand, hero_seat);
+    let node = node_index(n, hero_seat, mask)?;
+    let (range, evs) = ranges_at(output, n, node)?;
+    let is_raise = mask == 0;
+    let hero_label = solver_seat_label(hero.position, n).unwrap_or("?");
+    let title = if shovers.is_empty() {
+        format!("{hero_label} push")
+    } else {
+        format!("{hero_label} call (vs {})", shovers.join("+"))
+    };
+    Some(Spot {
+        range,
+        evs: Some(evs),
+        title,
         is_raise,
     })
+}
+
+fn prior_shove_mask(hand: &ImportedHand, hero_seat: usize) -> (u32, Vec<String>) {
+    let n = hand.players.len();
+    let mut mask = 0u32;
+    let mut shovers = Vec::new();
+    for action in &hand.preflop_actions {
+        if action.name == hand.hero_name {
+            break;
+        }
+        let Some(player) = hand.players.iter().find(|p| p.name == action.name) else {
+            continue;
+        };
+        let Some(seat) = solver_position_index(player.position, n) else {
+            continue;
+        };
+        if seat < hero_seat && !action.kind.is_fold() {
+            mask |= 1 << seat;
+            if let Some(label) = solver_seat_label(player.position, n) {
+                shovers.push(label.to_string());
+            }
+        }
+    }
+    (mask, shovers)
+}
+
+fn node_index(players: usize, actor: usize, mask: u32) -> Option<usize> {
+    Some(match players {
+        5 => five_node(actor, mask),
+        6 => six_node(actor, mask),
+        7 => seven_node(actor, mask),
+        8 => eight_node(actor, mask),
+        9 => nine_node(actor, mask),
+        _ => return None,
+    })
+}
+
+fn ranges_at(output: &SolverOutput, players: usize, node: usize) -> Option<([f64; 169], [f64; 169])> {
+    let (freq, ev) = match players {
+        5 => output.five_max.as_ref().map(|r| (&r.freq, &r.ev)),
+        6 => output.six_max.as_ref().map(|r| (&r.freq, &r.ev)),
+        7 => output.seven_max.as_ref().map(|r| (&r.freq, &r.ev)),
+        8 => output.eight_max.as_ref().map(|r| (&r.freq, &r.ev)),
+        9 => output.nine_max.as_ref().map(|r| (&r.freq, &r.ev)),
+        _ => None,
+    }?;
+    Some((*freq.get(node)?, *ev.get(node)?))
+}
+
+fn is_push_fold_spot(hand: &ImportedHand) -> bool {
+    let Some(hero_action) = hand.hero_action else {
+        return false;
+    };
+    if matches!(hero_action, HeroActionKind::Check) {
+        return false;
+    }
+
+    let mut facing_all_in = false;
+    let mut raised_short = false;
+    for action in &hand.preflop_actions {
+        let is_hero = action.name == hand.hero_name;
+        match action.kind {
+            HeroActionKind::Fold | HeroActionKind::Check => {}
+            HeroActionKind::Raise => {
+                if is_hero && !action.all_in {
+                    return false;
+                }
+                if raised_short {
+                    return false;
+                }
+                if action.all_in {
+                    facing_all_in = true;
+                } else {
+                    raised_short = true;
+                }
+            }
+            HeroActionKind::Call => {
+                if facing_all_in || action.all_in {
+                    facing_all_in = true;
+                } else {
+                    return false;
+                }
+            }
+        }
+    }
+    true
 }
 
 fn actions_before_hero(hand: &ImportedHand) -> Vec<(String, bool)> {
@@ -1345,7 +1889,7 @@ fn draw_row(
     cols: &[f32],
     values: &[&str],
     selected: bool,
-    verdict: Option<Verdict>,
+    mark: DiffMark,
 ) -> egui::Response {
     let widths = stretched_cols(ui, cols);
     let width = widths.iter().sum::<f32>().max(1.0);
@@ -1362,37 +1906,356 @@ fn draw_row(
     let mut x = rect.left() + 6.0;
     let mut cursor = rect.left();
     for (i, (value, col)) in values.iter().zip(widths.iter()).enumerate() {
-        let mut color = TEXT;
-        let mut text = (*value).to_string();
-        if i == 0 {
-            if let Some(verdict) = verdict {
-                let mark = match verdict {
-                    Verdict::Correct => "✔",
-                    Verdict::Warning => "!",
-                    Verdict::Mistake => "✘",
-                };
-                color = match verdict {
-                    Verdict::Correct => GREEN,
-                    Verdict::Warning => YELLOW,
-                    Verdict::Mistake => RED,
-                };
-                if !text.is_empty() {
-                    text = format!("{mark} {text}");
-                } else {
-                    text = mark.to_string();
-                }
+        if i == 0 && !matches!(mark, DiffMark::None) {
+            let icon = egui::Rect::from_center_size(
+                egui::pos2(x + 7.0, rect.center().y),
+                egui::vec2(14.0, 14.0),
+            );
+            let number_color = match mark {
+                DiffMark::Scored(Verdict::Correct) => GREEN,
+                DiffMark::Scored(Verdict::Mistake) => RED,
+                _ => TEXT,
+            };
+            match mark {
+                DiffMark::Excluded => paint_excluded_mark(ui.painter(), icon),
+                DiffMark::Scored(Verdict::Correct) => paint_correct_mark(ui.painter(), icon),
+                DiffMark::Scored(Verdict::Warning) => paint_warning_mark(ui.painter(), icon),
+                DiffMark::Scored(Verdict::Mistake) => paint_mistake_mark(ui.painter(), icon),
+                DiffMark::None => {}
             }
+            if !value.is_empty() && !matches!(mark, DiffMark::Excluded) {
+                ui.painter().text(
+                    egui::pos2(x + 18.0, rect.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    *value,
+                    font.clone(),
+                    number_color,
+                );
+            }
+        } else {
+            ui.painter().text(
+                egui::pos2(x, rect.center().y),
+                egui::Align2::LEFT_CENTER,
+                *value,
+                font.clone(),
+                TEXT,
+            );
         }
-        ui.painter().text(
-            egui::pos2(x, rect.center().y),
-            egui::Align2::LEFT_CENTER,
-            text,
-            font.clone(),
-            color,
-        );
         cursor += *col;
         x = cursor + 6.0;
     }
     draw_grid_lines(ui, rect, &widths);
     response
+}
+
+fn pad_prize_rows(mut prizes: Vec<(String, String)>) -> Vec<(String, String)> {
+    prizes.truncate(PRIZE_SLOTS);
+    while prizes.len() < PRIZE_SLOTS {
+        prizes.push((String::new(), String::new()));
+    }
+    prizes
+}
+
+fn prize_dollar_sum(prizes: &[(String, String)]) -> f64 {
+    prizes
+        .iter()
+        .filter_map(|(dollars, _)| dollars.trim().parse::<f64>().ok())
+        .sum()
+}
+
+fn win_group_box(ui: &mut Ui, title: &str, size: egui::Vec2, add_contents: impl FnOnce(&mut Ui)) {
+    let (_, rect) = ui.allocate_space(size);
+    let painter = ui.painter_at(rect);
+    let stroke = Stroke::new(1.0_f32, ui.visuals().widgets.noninteractive.bg_stroke.color);
+    let top = rect.top() + 8.0;
+    let border = egui::Rect::from_min_max(egui::pos2(rect.left(), top), rect.max);
+    painter.rect_stroke(border, 2.0, stroke);
+
+    let font = FontId::proportional(12.5);
+    let color = ui.visuals().text_color();
+    let galley = painter.layout_no_wrap(title.to_owned(), font, color);
+    let title_pos = egui::pos2(rect.left() + 10.0, top - galley.size().y * 0.5);
+    let bg = egui::Rect::from_min_size(
+        title_pos - egui::vec2(4.0, 0.0),
+        galley.size() + egui::vec2(8.0, 0.0),
+    );
+    painter.rect_filled(bg, 0.0, ui.visuals().window_fill());
+    painter.galley(title_pos, galley, color);
+
+    let inner = egui::Rect::from_min_max(
+        egui::pos2(rect.left() + 8.0, top + 10.0),
+        egui::pos2(rect.right() - 8.0, rect.bottom() - 8.0),
+    );
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(inner)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
+    add_contents(&mut child);
+}
+
+fn toolbar_icon_button(
+    ui: &mut Ui,
+    hover: &str,
+    paint: impl FnOnce(&egui::Painter, egui::Rect),
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(30.0, 26.0), Sense::click());
+    let response = response.on_hover_text(hover);
+    let visuals = ui.style().interact(&response);
+    if response.hovered() || response.has_focus() {
+        ui.painter().rect_filled(rect, 3.0, visuals.weak_bg_fill);
+        ui.painter()
+            .rect_stroke(rect, 3.0, Stroke::new(1.0_f32, visuals.bg_stroke.color));
+    }
+    paint(ui.painter(), rect.shrink2(egui::vec2(6.0, 5.0)));
+    response
+}
+
+fn paint_doc_icon(painter: &egui::Painter, rect: egui::Rect) {
+    let color = painter.ctx().style().visuals.text_color();
+    let stroke = Stroke::new(1.2_f32, color);
+    let fold = 5.0;
+    let body = egui::Rect::from_min_max(rect.min, rect.max - egui::vec2(0.0, 1.0));
+    painter.rect_stroke(body, 1.0, stroke);
+    painter.line_segment(
+        [
+            egui::pos2(body.right() - fold, body.top()),
+            egui::pos2(body.right() - fold, body.top() + fold),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            egui::pos2(body.right() - fold, body.top() + fold),
+            egui::pos2(body.right(), body.top() + fold),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            egui::pos2(body.right() - fold, body.top()),
+            egui::pos2(body.right(), body.top() + fold),
+        ],
+        stroke,
+    );
+}
+
+fn paint_folder_icon(painter: &egui::Painter, rect: egui::Rect) {
+    let color = painter.ctx().style().visuals.text_color();
+    let stroke = Stroke::new(1.2_f32, color);
+    let tab = rect.height() * 0.28;
+    painter.rect_stroke(
+        egui::Rect::from_min_max(
+            egui::pos2(rect.left(), rect.top() + tab),
+            rect.max,
+        ),
+        1.0,
+        stroke,
+    );
+    painter.line_segment(
+        [
+            rect.left_top() + egui::vec2(0.0, tab),
+            rect.left_top() + egui::vec2(0.0, tab * 0.2),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            rect.left_top() + egui::vec2(0.0, tab * 0.2),
+            rect.left_top() + egui::vec2(rect.width() * 0.45, tab * 0.2),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            rect.left_top() + egui::vec2(rect.width() * 0.45, tab * 0.2),
+            rect.left_top() + egui::vec2(rect.width() * 0.55, tab),
+        ],
+        stroke,
+    );
+}
+
+fn paint_save_icon(painter: &egui::Painter, rect: egui::Rect) {
+    let color = painter.ctx().style().visuals.text_color();
+    let stroke = Stroke::new(1.2_f32, color);
+    painter.rect_stroke(rect, 1.0, stroke);
+    let label = egui::Rect::from_min_max(
+        egui::pos2(rect.left() + 3.0, rect.top() + 1.5),
+        egui::pos2(rect.right() - 3.0, rect.top() + rect.height() * 0.42),
+    );
+    painter.rect_stroke(label, 0.0, stroke);
+    painter.line_segment(
+        [
+            egui::pos2(rect.left() + 4.0, rect.bottom() - 4.0),
+            egui::pos2(rect.right() - 4.0, rect.bottom() - 4.0),
+        ],
+        stroke,
+    );
+}
+
+fn paint_copy_icon(painter: &egui::Painter, rect: egui::Rect) {
+    let color = painter.ctx().style().visuals.text_color();
+    let stroke = Stroke::new(1.2_f32, color);
+    let back = egui::Rect::from_min_max(rect.min, rect.max - egui::vec2(3.0, 3.0));
+    let front = egui::Rect::from_min_max(rect.min + egui::vec2(3.0, 3.0), rect.max);
+    painter.rect_stroke(back, 1.0, stroke);
+    painter.rect_filled(front, 1.0, painter.ctx().style().visuals.window_fill());
+    painter.rect_stroke(front, 1.0, stroke);
+}
+
+fn paint_warning_icon(ui: &mut Ui, size: f32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), Sense::hover());
+    paint_warning_mark(ui.painter(), rect);
+}
+
+fn paint_mistake_icon(ui: &mut Ui, size: f32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), Sense::hover());
+    paint_mistake_mark(ui.painter(), rect);
+}
+
+fn paint_correct_mark(painter: &egui::Painter, rect: egui::Rect) {
+    let stroke = Stroke::new(2.0_f32, GREEN);
+    let mid = egui::pos2(
+        rect.left() + rect.width() * 0.38,
+        rect.bottom() - rect.height() * 0.28,
+    );
+    painter.line_segment(
+        [
+            egui::pos2(rect.left() + rect.width() * 0.12, rect.center().y),
+            mid,
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            mid,
+            egui::pos2(
+                rect.right() - rect.width() * 0.08,
+                rect.top() + rect.height() * 0.22,
+            ),
+        ],
+        stroke,
+    );
+}
+
+fn paint_excluded_mark(painter: &egui::Painter, rect: egui::Rect) {
+    let stroke = Stroke::new(1.7_f32, Color32::from_rgb(148, 154, 162));
+    let r = rect.shrink(2.2);
+    painter.line_segment([r.left_top(), r.right_bottom()], stroke);
+    painter.line_segment([r.right_top(), r.left_bottom()], stroke);
+}
+
+fn paint_warning_mark(painter: &egui::Painter, rect: egui::Rect) {
+    let c = rect.center();
+    let h = rect.height() * 0.46;
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            egui::pos2(c.x, c.y - h),
+            egui::pos2(c.x + h * 0.92, c.y + h * 0.72),
+            egui::pos2(c.x - h * 0.92, c.y + h * 0.72),
+        ],
+        WARN_YELLOW,
+        Stroke::NONE,
+    ));
+    painter.text(
+        c + egui::vec2(0.0, rect.height() * 0.08),
+        Align2::CENTER_CENTER,
+        "!",
+        FontId::proportional(rect.height() * 0.62),
+        Color32::BLACK,
+    );
+}
+
+fn paint_mistake_mark(painter: &egui::Painter, rect: egui::Rect) {
+    let c = rect.center();
+    let radius = rect.height() * 0.46;
+    painter.circle_filled(c, radius, MISTAKE_RED);
+    let s = radius * 0.38;
+    let stroke = Stroke::new((rect.height() * 0.12).max(1.4), Color32::WHITE);
+    painter.line_segment([c + egui::vec2(-s, -s), c + egui::vec2(s, s)], stroke);
+    painter.line_segment([c + egui::vec2(s, -s), c + egui::vec2(-s, s)], stroke);
+}
+
+#[cfg(test)]
+mod spot_filter_tests {
+    use super::{is_push_fold_spot, prior_shove_mask};
+    use poker_core::{parse_imported_hand, solver_position_index};
+
+    const OPEN_THEN_SHOVE: &str = r"PokerStars Hand #262330970830: Tournament #4038016204, $0.42+$0.08 USD Hold'em No Limit - Level V (75/150) - 2026/10/07 20:59:08 ET
+Table '4038016204 1' 9-max Seat #8 is the button
+Seat 2: wagnerrocha (890 in chips) 
+Seat 4: mkHasNutzz (3420 in chips) 
+Seat 5: MosherA (4472 in chips) 
+Seat 6: bbcbcv3 (945 in chips) 
+Seat 8: boladoph (3773 in chips) 
+wagnerrocha: posts small blind 75
+mkHasNutzz: posts big blind 150
+*** HOLE CARDS ***
+Dealt to bbcbcv3 [9d 8d]
+MosherA: folds 
+bbcbcv3: folds 
+boladoph: raises 300 to 450
+wagnerrocha: raises 440 to 890 and is all-in
+mkHasNutzz: folds 
+boladoph: calls 440
+*** FLOP *** [Jd Th 8h]
+*** SUMMARY ***
+Total pot 1930 | Rake 0 
+";
+
+    const TWO_SHOVS: &str = r"PokerStars Hand #262330946442: Tournament #4038016204, $0.42+$0.08 USD Hold'em No Limit - Level V (75/150) - 2026/10/07 20:54:29 ET
+Table '4038016204 1' 9-max Seat #9 is the button
+Seat 1: guridebarba (859 in chips) 
+Seat 2: wagnerrocha (1265 in chips) 
+Seat 3: shadestacian (1087 in chips) 
+Seat 4: mkHasNutzz (3046 in chips) 
+Seat 5: MosherA (1363 in chips) 
+Seat 6: bbcbcv3 (1395 in chips) 
+Seat 8: boladoph (3140 in chips) 
+Seat 9: whorvatte (1345 in chips) 
+guridebarba: posts small blind 75
+wagnerrocha: posts big blind 150
+*** HOLE CARDS ***
+Dealt to bbcbcv3 [Td 6s]
+shadestacian: raises 937 to 1087 and is all-in
+mkHasNutzz: folds 
+MosherA: raises 276 to 1363 and is all-in
+bbcbcv3: folds 
+boladoph: folds 
+whorvatte: folds 
+guridebarba: calls 784 and is all-in
+wagnerrocha: folds 
+*** SUMMARY ***
+Total pot 3183 | Rake 0 
+";
+
+    #[test]
+    fn minraise_then_shove_is_not_push_fold() {
+        let hand = parse_imported_hand(OPEN_THEN_SHOVE).unwrap();
+        assert!(!is_push_fold_spot(&hand));
+    }
+
+    #[test]
+    fn two_all_in_raises_before_hero_fold_is_push_fold() {
+        let hand = parse_imported_hand(TWO_SHOVS).unwrap();
+        assert!(is_push_fold_spot(&hand));
+        let hero = hand.hero_player().unwrap();
+        let seat = solver_position_index(hero.position, hand.players.len()).unwrap();
+        let (mask, shovers) = prior_shove_mask(&hand, seat);
+        assert_eq!(seat, 3);
+        assert_eq!(mask, 0b101);
+        assert_eq!(shovers, vec!["UTG".to_string(), "MP".to_string()]);
+    }
+}
+
+fn draw_table_grid(ui: &Ui, rect: egui::Rect, cols: &[f32], color: Color32) {
+    let stroke = Stroke::new(1.0_f32, color);
+    let mut x = rect.left();
+    for (index, width) in cols.iter().enumerate() {
+        x += *width;
+        if index + 1 < cols.len() {
+            ui.painter()
+                .line_segment([egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())], stroke);
+        }
+    }
 }
