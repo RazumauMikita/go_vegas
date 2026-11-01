@@ -2,16 +2,18 @@ use std::collections::HashMap;
 
 use egui::{Color32, FontId, Pos2, Rect, Sense, Ui};
 use poker_core::{
-    eight_node, five_node, nine_node, seven_node, six_node, table_position_label, EightMaxRanges,
-    FiveMaxRanges, FourMaxRanges, NineMaxRanges, SevenMaxRanges, SixMaxRanges, SolverOutput,
-    ThreeMaxHandEvs, ThreeMaxRanges,
+    eight_node, five_node, nine_node, seven_node, six_node, table_position_label, FourMaxRanges,
+    SolverOutput, ThreeMaxHandEvs, ThreeMaxRanges,
 };
 
 use crate::widgets::{combo_share, range_notation};
 
-const COL_ACTION_W: f32 = 108.0;
-const COL_AMT_W: f32 = 64.0;
-const COL_PLAYER_W: f32 = 52.0;
+const COL_AMT_W: f32 = 52.0;
+const COL_PLAYER_W: f32 = 44.0;
+const COL_ACTION_MIN: f32 = 92.0;
+const COL_ACTION_MAX: f32 = 148.0;
+const COL_RANGE_MIN: f32 = 72.0;
+const INDENT_W: f32 = 16.0;
 const ROW_H: f32 = 22.0;
 const TREE_HEADER: Color32 = Color32::from_rgb(70, 141, 196);
 const TREE_SELECTED: Color32 = Color32::from_rgb(196, 226, 248);
@@ -25,8 +27,23 @@ const DOT_CALL_NESTED: Color32 = Color32::from_rgb(66, 133, 244);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     Raise,
+    ThreeBet,
+    FourBet,
     Call,
     CallSpecial,
+}
+
+impl Action {
+    pub fn is_raise(self) -> bool {
+        matches!(
+            self,
+            Self::Raise | Self::ThreeBet | Self::FourBet
+        )
+    }
+
+    pub fn is_call(self) -> bool {
+        matches!(self, Self::Call | Self::CallSpecial)
+    }
 }
 
 #[derive(Clone)]
@@ -39,6 +56,7 @@ pub struct TreeNode {
     pub ev_range: Option<[f64; 169]>,
     pub children: Vec<TreeNode>,
     pub expanded: bool,
+    pub amount_bb: f64,
 }
 
 pub type NodePath = Vec<usize>;
@@ -51,6 +69,8 @@ impl TreeNode {
     pub fn action_code(&self) -> &'static str {
         match self.action {
             Action::Raise => "R",
+            Action::ThreeBet => "3B",
+            Action::FourBet => "4B",
             Action::Call | Action::CallSpecial => "C",
         }
     }
@@ -63,23 +83,53 @@ pub fn build_strategy_tree(
     big_blind: f64,
 ) -> Vec<TreeNode> {
     let mut tree = if let Some(ranges) = output.nine_max.as_ref() {
-        let mut tree = build_9max_tree(ranges, output, button_index);
+        let mut tree = build_mask_tree(
+            9,
+            stacks,
+            big_blind,
+            |a, m| ranges.freq[nine_node(a, m)],
+            nine_node,
+        );
         attach_node_evs(&mut tree, &ranges.ev);
         tree
     } else if let Some(ranges) = output.eight_max.as_ref() {
-        let mut tree = build_8max_tree(ranges, output, button_index);
+        let mut tree = build_mask_tree(
+            8,
+            stacks,
+            big_blind,
+            |a, m| ranges.freq[eight_node(a, m)],
+            eight_node,
+        );
         attach_node_evs(&mut tree, &ranges.ev);
         tree
     } else if let Some(ranges) = output.seven_max.as_ref() {
-        let mut tree = build_7max_tree(ranges, output, button_index);
+        let mut tree = build_mask_tree(
+            7,
+            stacks,
+            big_blind,
+            |a, m| ranges.freq[seven_node(a, m)],
+            seven_node,
+        );
         attach_node_evs(&mut tree, &ranges.ev);
         tree
     } else if let Some(ranges) = output.six_max.as_ref() {
-        let mut tree = build_6max_tree(ranges, output, button_index);
+        let mut tree = build_mask_tree(
+            6,
+            stacks,
+            big_blind,
+            |a, m| ranges.freq[six_node(a, m)],
+            six_node,
+        );
         attach_node_evs(&mut tree, &ranges.ev);
         tree
     } else if let Some(ranges) = output.five_max.as_ref() {
-        let mut tree = build_5max_tree(ranges, output, button_index);
+        let mut tree = build_mask_tree(
+            5,
+            stacks,
+            big_blind,
+            |a, m| ranges.freq[five_node(a, m)],
+            five_node,
+        );
         attach_node_evs(&mut tree, &ranges.ev);
         tree
     } else if let Some(ranges) = output.four_max.as_ref() {
@@ -124,8 +174,6 @@ fn relabel_unopened(
             } else {
                 Action::Call
             };
-        } else if !matches!(node.action, Action::CallSpecial) {
-            node.action = Action::Call;
         }
         let child_unopened = unopened && !can_raise;
         relabel_unopened(&mut node.children, stacks, big_blind, child_unopened);
@@ -142,9 +190,9 @@ fn attach_node_evs(tree: &mut [TreeNode], evs: &[[f64; 169]]) {
 }
 
 fn expand_one_level(tree: &mut [TreeNode]) {
-    for node in tree {
+    collapse_all(tree);
+    if let Some(node) = tree.first_mut() {
         node.expanded = !node.children.is_empty();
-        collapse_all(&mut node.children);
     }
 }
 
@@ -153,6 +201,43 @@ fn collapse_all(tree: &mut [TreeNode]) {
         node.expanded = false;
         collapse_all(&mut node.children);
     }
+}
+
+pub fn expand_path(tree: &mut [TreeNode], path: &[usize]) {
+    if path.is_empty() {
+        return;
+    }
+    collapse_all(tree);
+    let mut nodes = tree;
+    for (depth, &index) in path.iter().enumerate() {
+        let Some(node) = nodes.get_mut(index) else {
+            return;
+        };
+        if depth + 1 < path.len() || path.len() == 1 {
+            node.expanded = !node.children.is_empty();
+        }
+        nodes = node.children.as_mut_slice();
+    }
+}
+
+pub fn display_player(name: &str) -> &str {
+    if name == "BTN" {
+        "BU"
+    } else {
+        name
+    }
+}
+
+pub fn format_amount_bb(amount: f64) -> String {
+    if amount >= 10.0 - 1e-9 {
+        format!("{amount:.1}")
+    } else {
+        format!("{amount:.2}")
+    }
+}
+
+pub fn display_vs(vs: &str) -> String {
+    vs.replace("BTN", "BU")
 }
 
 pub fn node_at_path<'a>(tree: &'a [TreeNode], path: &[usize]) -> Option<&'a TreeNode> {
@@ -210,6 +295,8 @@ fn walk_spot(
     let abs = skip + j;
     if *is_fold {
         walk_spot(siblings, path, abs + 1, &remaining[1..], hero)
+    } else if siblings[abs].children.is_empty() {
+        None
     } else {
         let mut next = path;
         next.push(abs);
@@ -224,33 +311,41 @@ pub fn draw_strategy_tree_header(ui: &mut Ui) {
     ui.painter().rect_filled(rect, 0.0, TREE_HEADER);
     let font = FontId::proportional(13.0);
     let y = rect.center().y;
-    paint_col_text(ui, rect.left() + 8.0, y, "Action", &font, Color32::WHITE, None);
-    paint_col_text(
+    paint_col(
         ui,
-        rect.left() + cols.action,
+        cols.action_rect(rect),
+        rect.left() + 8.0,
+        y,
+        "Action",
+        &font,
+        Color32::WHITE,
+    );
+    paint_col(
+        ui,
+        cols.amt_rect(rect),
+        cols.amt_x(rect),
         y,
         "Amt [BB]",
         &font,
         Color32::WHITE,
-        None,
     );
-    paint_col_text(
+    paint_col(
         ui,
-        rect.left() + cols.action + cols.amt,
+        cols.player_rect(rect),
+        cols.player_x(rect),
         y,
         "Player",
         &font,
         Color32::WHITE,
-        None,
     );
-    paint_col_text(
+    paint_col(
         ui,
-        rect.left() + cols.action + cols.amt + cols.player,
+        cols.range_rect(rect),
+        cols.range_x(rect),
         y,
         "Range",
         &font,
         Color32::WHITE,
-        None,
     );
 }
 
@@ -274,7 +369,11 @@ pub fn draw_strategy_tree(
         let is_selected = selected_path.as_ref() == Some(&current_path);
         let is_locked = locked_ids.contains_key(&node.range_id);
         let has_children = !node.children.is_empty();
-        let amount = stacks_bb.get(node.player()).copied().unwrap_or(0.0);
+        let amount = if node.amount_bb > 0.0 {
+            node.amount_bb
+        } else {
+            stacks_bb.get(node.player()).copied().unwrap_or(0.0)
+        };
         let notation = range_notation(&node.range);
         let range_text = if notation.is_empty() {
             format!("{:.1}%", node.range_pct)
@@ -302,14 +401,15 @@ pub fn draw_strategy_tree(
             );
         }
 
-        let indent = depth as f32 * 14.0;
+        let action_rect = cols.action_rect(rect);
+        let indent = depth as f32 * INDENT_W;
         let action_left = rect.left() + 4.0 + indent;
         let mut expand_clicked = false;
         if has_children {
             let icon = if node.expanded { "▼" } else { "▶" };
             let icon_pos = Pos2::new(action_left + 8.0, rect.center().y);
             let icon_rect = Rect::from_center_size(icon_pos, egui::vec2(16.0, ROW_H));
-            ui.painter().text(
+            ui.painter().with_clip_rect(action_rect).text(
                 icon_pos,
                 egui::Align2::CENTER_CENTER,
                 icon,
@@ -318,7 +418,7 @@ pub fn draw_strategy_tree(
             );
             if response.clicked() {
                 if let Some(pos) = response.interact_pointer_pos() {
-                    if icon_rect.contains(pos) {
+                    if icon_rect.contains(pos) && action_rect.contains(pos) {
                         node.expanded = !node.expanded;
                         expand_clicked = true;
                     }
@@ -326,19 +426,27 @@ pub fn draw_strategy_tree(
             }
         }
 
-        let is_call = matches!(node.action, Action::Call | Action::CallSpecial);
+        let is_call = node.action.is_call();
+        let is_nested_raise = matches!(node.action, Action::FourBet);
         let dot_x = action_left + if has_children { 22.0 } else { 18.0 };
-        let dot_color = if in_call_line {
+        let dot_color = if in_call_line || is_nested_raise {
             DOT_CALL_NESTED
-        } else if is_call {
+        } else if is_call || matches!(node.action, Action::ThreeBet) {
             DOT_CALL
         } else {
             DOT_RAISE
         };
-        let in_call_line = in_call_line || is_call;
-        ui.painter()
-            .circle_filled(Pos2::new(dot_x, rect.center().y), 4.5, dot_color);
-        ui.painter().text(
+        let child_call_line = in_call_line
+            || matches!(
+                node.action,
+                Action::ThreeBet | Action::FourBet
+            );
+        ui.painter().with_clip_rect(action_rect).circle_filled(
+            Pos2::new(dot_x, rect.center().y),
+            4.5,
+            dot_color,
+        );
+        ui.painter().with_clip_rect(action_rect).text(
             Pos2::new(dot_x + 12.0, rect.center().y),
             egui::Align2::LEFT_CENTER,
             node.action_code(),
@@ -347,32 +455,32 @@ pub fn draw_strategy_tree(
         );
 
         let font = FontId::proportional(12.0);
-        paint_col_text(
+        paint_col(
             ui,
-            rect.left() + cols.action,
+            cols.amt_rect(rect),
+            cols.amt_x(rect),
             rect.center().y,
-            &format!("{amount:.2}"),
+            &format_amount_bb(amount),
             &font,
             TREE_TEXT,
-            None,
         );
-        paint_col_text(
+        paint_col(
             ui,
-            rect.left() + cols.action + cols.amt,
+            cols.player_rect(rect),
+            cols.player_x(rect),
             rect.center().y,
-            node.player(),
+            display_player(node.player()),
             &font,
             TREE_TEXT,
-            None,
         );
-        paint_col_text(
+        paint_col(
             ui,
-            rect.left() + cols.action + cols.amt + cols.player,
+            cols.range_rect(rect),
+            cols.range_x(rect),
             rect.center().y,
             &range_text,
             &font,
             TREE_TEXT,
-            Some(rect.right() - 4.0),
         );
 
         if response.clicked() && !expand_clicked {
@@ -392,18 +500,20 @@ pub fn draw_strategy_tree(
                 stacks_bb,
                 &current_path,
                 depth + 1,
-                in_call_line,
+                child_call_line,
             );
         }
     }
 }
 
 fn tree_columns(width: f32) -> TreeColumns {
-    let scale = (width / 420.0).clamp(0.62, 1.0);
+    let amt = COL_AMT_W;
+    let player = COL_PLAYER_W;
+    let action = (width - amt - player - COL_RANGE_MIN).clamp(COL_ACTION_MIN, COL_ACTION_MAX);
     TreeColumns {
-        action: COL_ACTION_W * scale,
-        amt: COL_AMT_W * scale,
-        player: COL_PLAYER_W * scale,
+        action,
+        amt,
+        player,
     }
 }
 
@@ -413,37 +523,56 @@ struct TreeColumns {
     player: f32,
 }
 
-fn paint_col_text(
-    ui: &Ui,
-    x: f32,
-    y: f32,
-    text: &str,
-    font: &FontId,
-    color: Color32,
-    clip_right: Option<f32>,
-) {
-    if let Some(right) = clip_right {
-        ui.painter()
-            .with_clip_rect(Rect::from_min_max(
-                Pos2::new(x, y - ROW_H * 0.5),
-                Pos2::new(right, y + ROW_H * 0.5),
-            ))
-            .text(
-                Pos2::new(x, y),
-                egui::Align2::LEFT_CENTER,
-                text,
-                font.clone(),
-                color,
-            );
-    } else {
-        ui.painter().text(
-            Pos2::new(x, y),
-            egui::Align2::LEFT_CENTER,
-            text,
-            font.clone(),
-            color,
-        );
+impl TreeColumns {
+    fn amt_x(&self, rect: Rect) -> f32 {
+        rect.left() + self.action
     }
+
+    fn player_x(&self, rect: Rect) -> f32 {
+        self.amt_x(rect) + self.amt
+    }
+
+    fn range_x(&self, rect: Rect) -> f32 {
+        self.player_x(rect) + self.player
+    }
+
+    fn action_rect(&self, rect: Rect) -> Rect {
+        Rect::from_min_max(
+            Pos2::new(rect.left(), rect.top()),
+            Pos2::new(self.amt_x(rect), rect.bottom()),
+        )
+    }
+
+    fn amt_rect(&self, rect: Rect) -> Rect {
+        Rect::from_min_max(
+            Pos2::new(self.amt_x(rect), rect.top()),
+            Pos2::new(self.player_x(rect), rect.bottom()),
+        )
+    }
+
+    fn player_rect(&self, rect: Rect) -> Rect {
+        Rect::from_min_max(
+            Pos2::new(self.player_x(rect), rect.top()),
+            Pos2::new(self.range_x(rect), rect.bottom()),
+        )
+    }
+
+    fn range_rect(&self, rect: Rect) -> Rect {
+        Rect::from_min_max(
+            Pos2::new(self.range_x(rect), rect.top()),
+            Pos2::new(rect.right(), rect.bottom()),
+        )
+    }
+}
+
+fn paint_col(ui: &Ui, clip: Rect, x: f32, y: f32, text: &str, font: &FontId, color: Color32) {
+    ui.painter().with_clip_rect(clip).text(
+        Pos2::new(x + 2.0, y),
+        egui::Align2::LEFT_CENTER,
+        text,
+        font.clone(),
+        color,
+    );
 }
 
 fn make_node(
@@ -463,7 +592,231 @@ fn make_node(
         ev_range,
         children,
         expanded: false,
+        amount_bb: 0.0,
     }
+}
+
+fn build_mask_tree<F, N>(
+    n: usize,
+    stacks: &[f64],
+    big_blind: f64,
+    freq: F,
+    node_index: N,
+) -> Vec<TreeNode>
+where
+    F: Fn(usize, u32) -> [f64; 169],
+    N: Fn(usize, u32) -> usize,
+{
+    if n < 2 {
+        return Vec::new();
+    }
+    let bb = big_blind.max(1e-9);
+    (0..n - 1)
+        .map(|actor| first_in_node(n, actor, stacks, bb, &freq, &node_index))
+        .collect()
+}
+
+fn first_in_node<F, N>(
+    n: usize,
+    actor: usize,
+    stacks: &[f64],
+    big_blind: f64,
+    freq: &F,
+    node_index: &N,
+) -> TreeNode
+where
+    F: Fn(usize, u32) -> [f64; 169],
+    N: Fn(usize, u32) -> usize,
+{
+    let stack = stacks.get(actor).copied().unwrap_or(0.0);
+    let opens = stack > big_blind + 1e-9;
+    let action = if opens {
+        Action::Raise
+    } else {
+        Action::Call
+    };
+    let current_bet = if opens { stack } else { big_blind };
+    let raise_level = if opens { 1 } else { 0 };
+    let children = response_nodes(
+        n,
+        1 << actor,
+        actor + 1,
+        raise_level,
+        current_bet,
+        stacks,
+        big_blind,
+        true,
+        freq,
+        node_index,
+    );
+    let mut node = make_node(
+        node_index(actor, 0),
+        &mask_label(n, actor, 0),
+        action,
+        freq(actor, 0),
+        None,
+        children,
+    );
+    node.amount_bb = effective_stack_bb(actor, n, 0, stack, stacks, big_blind);
+    node
+}
+
+fn response_nodes<F, N>(
+    n: usize,
+    mask: u32,
+    next: usize,
+    raise_level: u8,
+    current_bet: f64,
+    stacks: &[f64],
+    big_blind: f64,
+    nest: bool,
+    freq: &F,
+    node_index: &N,
+) -> Vec<TreeNode>
+where
+    F: Fn(usize, u32) -> [f64; 169],
+    N: Fn(usize, u32) -> usize,
+{
+    if next >= n {
+        return Vec::new();
+    }
+    let stack = stacks.get(next).copied().unwrap_or(0.0);
+    let behind = next + 1 < n;
+    let reraises = behind && stack > current_bet + 1e-9;
+    let (action, new_level, new_bet) = if reraises {
+        let level = raise_level.saturating_add(1);
+        (reraise_action(level), level, current_bet.max(stack))
+    } else {
+        (Action::Call, raise_level, current_bet)
+    };
+    let nested = if nest {
+        response_nodes(
+            n,
+            mask | (1 << next),
+            next + 1,
+            new_level,
+            new_bet,
+            stacks,
+            big_blind,
+            false,
+            freq,
+            node_index,
+        )
+    } else {
+        Vec::new()
+    };
+    let mut continue_node = make_node(
+        node_index(next, mask),
+        &mask_label(n, next, mask),
+        action,
+        freq(next, mask),
+        None,
+        nested,
+    );
+    continue_node.amount_bb = action_amount_bb(
+        next,
+        n,
+        mask,
+        stack,
+        current_bet,
+        stacks,
+        big_blind,
+        reraises,
+    );
+    let mut children = vec![continue_node];
+    children.extend(response_nodes(
+        n,
+        mask,
+        next + 1,
+        raise_level,
+        current_bet,
+        stacks,
+        big_blind,
+        nest,
+        freq,
+        node_index,
+    ));
+    children
+}
+
+fn reraise_action(level: u8) -> Action {
+    match level {
+        0 | 1 => Action::Raise,
+        2 => Action::ThreeBet,
+        _ => Action::FourBet,
+    }
+}
+
+fn action_amount_bb(
+    actor: usize,
+    n: usize,
+    mask: u32,
+    stack: f64,
+    current_bet: f64,
+    stacks: &[f64],
+    big_blind: f64,
+    is_reraise: bool,
+) -> f64 {
+    let bb = big_blind.max(1e-9);
+    if is_reraise {
+        return effective_stack_bb(actor, n, mask, stack, stacks, big_blind);
+    }
+    let posted = posted_chips(actor, n, big_blind);
+    ((stack.min(current_bet) - posted) / bb).max(0.0)
+}
+
+fn posted_chips(actor: usize, n: usize, big_blind: f64) -> f64 {
+    if actor + 1 == n {
+        big_blind
+    } else if actor + 2 == n {
+        big_blind * 0.5
+    } else {
+        0.0
+    }
+}
+
+fn effective_stack_bb(
+    actor: usize,
+    n: usize,
+    mask: u32,
+    stack: f64,
+    stacks: &[f64],
+    big_blind: f64,
+) -> f64 {
+    let bb = big_blind.max(1e-9);
+    let mut max_other: f64 = 0.0;
+    for seat in 0..n {
+        if seat == actor {
+            continue;
+        }
+        let alive = (mask & (1 << seat)) != 0 || seat > actor;
+        if alive {
+            max_other = max_other.max(stacks.get(seat).copied().unwrap_or(0.0));
+        }
+    }
+    if max_other <= 0.0 {
+        stack / bb
+    } else {
+        stack.min(max_other) / bb
+    }
+}
+
+fn mask_label(n: usize, actor: usize, mask: u32) -> String {
+    let player = table_position_label(n, actor);
+    let vs = vs_labels(n, mask);
+    if vs.is_empty() {
+        player.to_string()
+    } else {
+        format!("{player} vs {vs}")
+    }
+}
+
+fn vs_labels(n: usize, mask: u32) -> String {
+    (0..n)
+        .filter(|seat| mask & (1 << seat) != 0)
+        .map(|seat| table_position_label(n, seat))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn build_3max_tree(ranges: &ThreeMaxRanges, hand_evs: Option<&ThreeMaxHandEvs>) -> Vec<TreeNode> {
@@ -657,1446 +1010,6 @@ fn build_4max_tree(
     ]
 }
 
-fn five_max_seat(button_index: usize, role: usize) -> usize {
-    let button = button_index % 5;
-    match role {
-        0 => (button + 3) % 5,
-        1 => (button + 4) % 5,
-        2 => button,
-        3 => (button + 1) % 5,
-        _ => (button + 2) % 5,
-    }
-}
-
-fn five_seat_ev(output: &SolverOutput, button_index: usize, role: usize) -> Option<[f64; 169]> {
-    output
-        .hand_evs
-        .get(five_max_seat(button_index, role))
-        .copied()
-}
-
-fn freq_node(ranges: &FiveMaxRanges, actor: usize, mask: u32) -> [f64; 169] {
-    ranges.freq[five_node(actor, mask)]
-}
-
-fn build_5max_tree(
-    ranges: &FiveMaxRanges,
-    output: &SolverOutput,
-    button_index: usize,
-) -> Vec<TreeNode> {
-    let ev = |role: usize| five_seat_ev(output, button_index, role);
-    let f = |actor: usize, mask: u32| freq_node(ranges, actor, mask);
-    vec![
-        make_node(
-            five_node(0, 0),
-            "HJ push",
-            Action::Raise,
-            f(0, 0),
-            ev(0),
-            vec![
-                make_node(
-                    five_node(1, 1),
-                    "CO call (vs HJ)",
-                    Action::Call,
-                    f(1, 1),
-                    None,
-                    vec![
-                        make_node(
-                            five_node(2, 3),
-                            "BTN call (vs HJ+CO)",
-                            Action::Call,
-                            f(2, 3),
-                            None,
-                            vec![
-                                make_node(
-                                    five_node(3, 7),
-                                    "SB call (vs HJ+CO+BTN)",
-                                    Action::Call,
-                                    f(3, 7),
-                                    None,
-                                    vec![make_node(
-                                        five_node(4, 15),
-                                        "BB call (5-way)",
-                                        Action::CallSpecial,
-                                        f(4, 15),
-                                        None,
-                                        vec![],
-                                    )],
-                                ),
-                                make_node(
-                                    five_node(4, 7),
-                                    "BB call (vs HJ+CO+BTN)",
-                                    Action::Call,
-                                    f(4, 7),
-                                    None,
-                                    vec![],
-                                ),
-                            ],
-                        ),
-                        make_node(
-                            five_node(3, 3),
-                            "SB call (vs HJ+CO)",
-                            Action::Call,
-                            f(3, 3),
-                            None,
-                            vec![make_node(
-                                five_node(4, 11),
-                                "BB call (vs HJ+CO+SB)",
-                                Action::Call,
-                                f(4, 11),
-                                None,
-                                vec![],
-                            )],
-                        ),
-                        make_node(
-                            five_node(4, 3),
-                            "BB call (vs HJ+CO)",
-                            Action::Call,
-                            f(4, 3),
-                            None,
-                            vec![],
-                        ),
-                    ],
-                ),
-                make_node(
-                    five_node(2, 1),
-                    "BTN call (vs HJ)",
-                    Action::Call,
-                    f(2, 1),
-                    None,
-                    vec![
-                        make_node(
-                            five_node(3, 5),
-                            "SB call (vs HJ+BTN)",
-                            Action::Call,
-                            f(3, 5),
-                            None,
-                            vec![make_node(
-                                five_node(4, 13),
-                                "BB call (vs HJ+BTN+SB)",
-                                Action::Call,
-                                f(4, 13),
-                                None,
-                                vec![],
-                            )],
-                        ),
-                        make_node(
-                            five_node(4, 5),
-                            "BB call (vs HJ+BTN)",
-                            Action::Call,
-                            f(4, 5),
-                            None,
-                            vec![],
-                        ),
-                    ],
-                ),
-                make_node(
-                    five_node(3, 1),
-                    "SB call (vs HJ)",
-                    Action::Call,
-                    f(3, 1),
-                    None,
-                    vec![make_node(
-                        five_node(4, 9),
-                        "BB call (vs HJ+SB)",
-                        Action::Call,
-                        f(4, 9),
-                        None,
-                        vec![],
-                    )],
-                ),
-                make_node(
-                    five_node(4, 1),
-                    "BB call (vs HJ)",
-                    Action::Call,
-                    f(4, 1),
-                    None,
-                    vec![],
-                ),
-            ],
-        ),
-        make_node(
-            five_node(1, 0),
-            "CO push (HJ fold)",
-            Action::Raise,
-            f(1, 0),
-            ev(1),
-            vec![
-                make_node(
-                    five_node(2, 2),
-                    "BTN call (vs CO)",
-                    Action::Call,
-                    f(2, 2),
-                    None,
-                    vec![
-                        make_node(
-                            five_node(3, 6),
-                            "SB call (vs CO+BTN)",
-                            Action::Call,
-                            f(3, 6),
-                            None,
-                            vec![make_node(
-                                five_node(4, 14),
-                                "BB call (vs CO+BTN+SB)",
-                                Action::Call,
-                                f(4, 14),
-                                None,
-                                vec![],
-                            )],
-                        ),
-                        make_node(
-                            five_node(4, 6),
-                            "BB call (vs CO+BTN)",
-                            Action::Call,
-                            f(4, 6),
-                            None,
-                            vec![],
-                        ),
-                    ],
-                ),
-                make_node(
-                    five_node(3, 2),
-                    "SB call (vs CO)",
-                    Action::Call,
-                    f(3, 2),
-                    None,
-                    vec![make_node(
-                        five_node(4, 10),
-                        "BB call (vs CO+SB)",
-                        Action::Call,
-                        f(4, 10),
-                        None,
-                        vec![],
-                    )],
-                ),
-                make_node(
-                    five_node(4, 2),
-                    "BB call (vs CO)",
-                    Action::Call,
-                    f(4, 2),
-                    None,
-                    vec![],
-                ),
-            ],
-        ),
-        make_node(
-            five_node(2, 0),
-            "BTN push (HJ+CO fold)",
-            Action::Raise,
-            f(2, 0),
-            ev(2),
-            vec![
-                make_node(
-                    five_node(3, 4),
-                    "SB call (vs BTN)",
-                    Action::Call,
-                    f(3, 4),
-                    None,
-                    vec![make_node(
-                        five_node(4, 12),
-                        "BB call (vs BTN+SB)",
-                        Action::CallSpecial,
-                        f(4, 12),
-                        None,
-                        vec![],
-                    )],
-                ),
-                make_node(
-                    five_node(4, 4),
-                    "BB call (vs BTN)",
-                    Action::Call,
-                    f(4, 4),
-                    None,
-                    vec![],
-                ),
-            ],
-        ),
-        make_node(
-            five_node(3, 0),
-            "SB push (folds)",
-            Action::Raise,
-            f(3, 0),
-            ev(3),
-            vec![make_node(
-                five_node(4, 8),
-                "BB call (vs SB)",
-                Action::Call,
-                f(4, 8),
-                ev(4),
-                vec![],
-            )],
-        ),
-    ]
-}
-
-fn six_max_seat(button_index: usize, role: usize) -> usize {
-    let button = button_index % 6;
-    match role {
-        0 => (button + 3) % 6,
-        1 => (button + 4) % 6,
-        2 => (button + 5) % 6,
-        3 => button,
-        4 => (button + 1) % 6,
-        _ => (button + 2) % 6,
-    }
-}
-
-fn six_seat_ev(output: &SolverOutput, button_index: usize, role: usize) -> Option<[f64; 169]> {
-    output
-        .hand_evs
-        .get(six_max_seat(button_index, role))
-        .copied()
-}
-
-fn freq_node6(ranges: &SixMaxRanges, actor: usize, mask: u32) -> [f64; 169] {
-    ranges.freq[six_node(actor, mask)]
-}
-
-fn build_6max_tree(
-    ranges: &SixMaxRanges,
-    output: &SolverOutput,
-    button_index: usize,
-) -> Vec<TreeNode> {
-    let ev = |role: usize| six_seat_ev(output, button_index, role);
-    let f = |actor: usize, mask: u32| freq_node6(ranges, actor, mask);
-    vec![
-        make_node(
-            six_node(0, 0),
-            "UTG push",
-            Action::Raise,
-            f(0, 0),
-            ev(0),
-            vec![
-                make_node(
-                    six_node(1, 1),
-                    "HJ call (vs UTG)",
-                    Action::Call,
-                    f(1, 1),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    six_node(2, 1),
-                    "CO call (vs UTG)",
-                    Action::Call,
-                    f(2, 1),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    six_node(3, 1),
-                    "BTN call (vs UTG)",
-                    Action::Call,
-                    f(3, 1),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    six_node(4, 1),
-                    "SB call (vs UTG)",
-                    Action::Call,
-                    f(4, 1),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    six_node(5, 1),
-                    "BB call (vs UTG)",
-                    Action::Call,
-                    f(5, 1),
-                    None,
-                    vec![],
-                ),
-            ],
-        ),
-        make_node(
-            six_node(1, 0),
-            "HJ push (UTG fold)",
-            Action::Raise,
-            f(1, 0),
-            ev(1),
-            vec![
-                make_node(
-                    six_node(2, 2),
-                    "CO call (vs HJ)",
-                    Action::Call,
-                    f(2, 2),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    six_node(3, 2),
-                    "BTN call (vs HJ)",
-                    Action::Call,
-                    f(3, 2),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    six_node(4, 2),
-                    "SB call (vs HJ)",
-                    Action::Call,
-                    f(4, 2),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    six_node(5, 2),
-                    "BB call (vs HJ)",
-                    Action::Call,
-                    f(5, 2),
-                    None,
-                    vec![],
-                ),
-            ],
-        ),
-        make_node(
-            six_node(2, 0),
-            "CO push (folds)",
-            Action::Raise,
-            f(2, 0),
-            ev(2),
-            vec![
-                make_node(
-                    six_node(3, 4),
-                    "BTN call (vs CO)",
-                    Action::Call,
-                    f(3, 4),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    six_node(4, 4),
-                    "SB call (vs CO)",
-                    Action::Call,
-                    f(4, 4),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    six_node(5, 4),
-                    "BB call (vs CO)",
-                    Action::Call,
-                    f(5, 4),
-                    None,
-                    vec![],
-                ),
-            ],
-        ),
-        make_node(
-            six_node(3, 0),
-            "BTN push (folds)",
-            Action::Raise,
-            f(3, 0),
-            ev(3),
-            vec![
-                make_node(
-                    six_node(4, 8),
-                    "SB call (vs BTN)",
-                    Action::Call,
-                    f(4, 8),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    six_node(5, 8),
-                    "BB call (vs BTN)",
-                    Action::Call,
-                    f(5, 8),
-                    None,
-                    vec![],
-                ),
-            ],
-        ),
-        make_node(
-            six_node(4, 0),
-            "SB push (folds)",
-            Action::Raise,
-            f(4, 0),
-            ev(4),
-            vec![make_node(
-                six_node(5, 16),
-                "BB call (vs SB)",
-                Action::Call,
-                f(5, 16),
-                ev(5),
-                vec![],
-            )],
-        ),
-    ]
-}
-
-fn seven_max_seat(button_index: usize, role: usize) -> usize {
-    let button = button_index % 7;
-    match role {
-        0 => (button + 3) % 7,
-        1 => (button + 4) % 7,
-        2 => (button + 5) % 7,
-        3 => (button + 6) % 7,
-        4 => button,
-        5 => (button + 1) % 7,
-        _ => (button + 2) % 7,
-    }
-}
-
-fn seven_seat_ev(output: &SolverOutput, button_index: usize, role: usize) -> Option<[f64; 169]> {
-    output
-        .hand_evs
-        .get(seven_max_seat(button_index, role))
-        .copied()
-}
-
-fn freq_node7(ranges: &SevenMaxRanges, actor: usize, mask: u32) -> [f64; 169] {
-    ranges.freq[seven_node(actor, mask)]
-}
-
-fn build_7max_tree(
-    ranges: &SevenMaxRanges,
-    output: &SolverOutput,
-    button_index: usize,
-) -> Vec<TreeNode> {
-    let ev = |role: usize| seven_seat_ev(output, button_index, role);
-    let f = |actor: usize, mask: u32| freq_node7(ranges, actor, mask);
-    vec![
-        make_node(
-            seven_node(0, 0),
-            "UTG push",
-            Action::Raise,
-            f(0, 0),
-            ev(0),
-            vec![
-                make_node(
-                    seven_node(1, 1),
-                    "MP call (vs UTG)",
-                    Action::Call,
-                    f(1, 1),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    seven_node(2, 1),
-                    "HJ call (vs UTG)",
-                    Action::Call,
-                    f(2, 1),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    seven_node(3, 1),
-                    "CO call (vs UTG)",
-                    Action::Call,
-                    f(3, 1),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    seven_node(4, 1),
-                    "BTN call (vs UTG)",
-                    Action::Call,
-                    f(4, 1),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    seven_node(5, 1),
-                    "SB call (vs UTG)",
-                    Action::Call,
-                    f(5, 1),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    seven_node(6, 1),
-                    "BB call (vs UTG)",
-                    Action::Call,
-                    f(6, 1),
-                    None,
-                    vec![],
-                ),
-            ],
-        ),
-        make_node(
-            seven_node(1, 0),
-            "MP push (UTG fold)",
-            Action::Raise,
-            f(1, 0),
-            ev(1),
-            vec![
-                make_node(
-                    seven_node(2, 2),
-                    "HJ call (vs MP)",
-                    Action::Call,
-                    f(2, 2),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    seven_node(3, 2),
-                    "CO call (vs MP)",
-                    Action::Call,
-                    f(3, 2),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    seven_node(4, 2),
-                    "BTN call (vs MP)",
-                    Action::Call,
-                    f(4, 2),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    seven_node(5, 2),
-                    "SB call (vs MP)",
-                    Action::Call,
-                    f(5, 2),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    seven_node(6, 2),
-                    "BB call (vs MP)",
-                    Action::Call,
-                    f(6, 2),
-                    None,
-                    vec![],
-                ),
-            ],
-        ),
-        make_node(
-            seven_node(2, 0),
-            "HJ push (folds)",
-            Action::Raise,
-            f(2, 0),
-            ev(2),
-            vec![
-                make_node(
-                    seven_node(3, 4),
-                    "CO call (vs HJ)",
-                    Action::Call,
-                    f(3, 4),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    seven_node(4, 4),
-                    "BTN call (vs HJ)",
-                    Action::Call,
-                    f(4, 4),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    seven_node(5, 4),
-                    "SB call (vs HJ)",
-                    Action::Call,
-                    f(5, 4),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    seven_node(6, 4),
-                    "BB call (vs HJ)",
-                    Action::Call,
-                    f(6, 4),
-                    None,
-                    vec![],
-                ),
-            ],
-        ),
-        make_node(
-            seven_node(3, 0),
-            "CO push (folds)",
-            Action::Raise,
-            f(3, 0),
-            ev(3),
-            vec![
-                make_node(
-                    seven_node(4, 8),
-                    "BTN call (vs CO)",
-                    Action::Call,
-                    f(4, 8),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    seven_node(5, 8),
-                    "SB call (vs CO)",
-                    Action::Call,
-                    f(5, 8),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    seven_node(6, 8),
-                    "BB call (vs CO)",
-                    Action::Call,
-                    f(6, 8),
-                    None,
-                    vec![],
-                ),
-            ],
-        ),
-        make_node(
-            seven_node(4, 0),
-            "BTN push (folds)",
-            Action::Raise,
-            f(4, 0),
-            ev(4),
-            vec![
-                make_node(
-                    seven_node(5, 16),
-                    "SB call (vs BTN)",
-                    Action::Call,
-                    f(5, 16),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    seven_node(6, 16),
-                    "BB call (vs BTN)",
-                    Action::Call,
-                    f(6, 16),
-                    None,
-                    vec![],
-                ),
-            ],
-        ),
-        make_node(
-            seven_node(5, 0),
-            "SB push (folds)",
-            Action::Raise,
-            f(5, 0),
-            ev(5),
-            vec![make_node(
-                seven_node(6, 32),
-                "BB call (vs SB)",
-                Action::Call,
-                f(6, 32),
-                ev(6),
-                vec![],
-            )],
-        ),
-    ]
-}
-
-fn eight_max_seat(button_index: usize, role: usize) -> usize {
-    let button = button_index % 8;
-    match role {
-        0 => (button + 3) % 8,
-        1 => (button + 4) % 8,
-        2 => (button + 5) % 8,
-        3 => (button + 6) % 8,
-        4 => (button + 7) % 8,
-        5 => button,
-        6 => (button + 1) % 8,
-        _ => (button + 2) % 8,
-    }
-}
-
-fn eight_seat_ev(output: &SolverOutput, button_index: usize, role: usize) -> Option<[f64; 169]> {
-    output
-        .hand_evs
-        .get(eight_max_seat(button_index, role))
-        .copied()
-}
-
-fn freq_node8(ranges: &EightMaxRanges, actor: usize, mask: u32) -> [f64; 169] {
-    ranges.freq[eight_node(actor, mask)]
-}
-
-fn build_8max_tree(
-    ranges: &EightMaxRanges,
-    output: &SolverOutput,
-    button_index: usize,
-) -> Vec<TreeNode> {
-    let ev = |role: usize| eight_seat_ev(output, button_index, role);
-    let f = |actor: usize, mask: u32| freq_node8(ranges, actor, mask);
-    vec![
-        make_node(
-            eight_node(0, 0),
-            "UTG push",
-            Action::Raise,
-            f(0, 0),
-            ev(0),
-            vec![
-                make_node(
-                    eight_node(1, 1),
-                    "EP call (vs UTG)",
-                    Action::Call,
-                    f(1, 1),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    eight_node(2, 1),
-                    "MP call (vs UTG)",
-                    Action::Call,
-                    f(2, 1),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    eight_node(3, 1),
-                    "HJ call (vs UTG)",
-                    Action::Call,
-                    f(3, 1),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    eight_node(4, 1),
-                    "CO call (vs UTG)",
-                    Action::Call,
-                    f(4, 1),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    eight_node(5, 1),
-                    "BTN call (vs UTG)",
-                    Action::Call,
-                    f(5, 1),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    eight_node(6, 1),
-                    "SB call (vs UTG)",
-                    Action::Call,
-                    f(6, 1),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    eight_node(7, 1),
-                    "BB call (vs UTG)",
-                    Action::Call,
-                    f(7, 1),
-                    None,
-                    vec![],
-                ),
-            ],
-        ),
-        make_node(
-            eight_node(1, 0),
-            "EP push (UTG fold)",
-            Action::Raise,
-            f(1, 0),
-            ev(1),
-            vec![
-                make_node(
-                    eight_node(2, 2),
-                    "MP call (vs EP)",
-                    Action::Call,
-                    f(2, 2),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    eight_node(3, 2),
-                    "HJ call (vs EP)",
-                    Action::Call,
-                    f(3, 2),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    eight_node(4, 2),
-                    "CO call (vs EP)",
-                    Action::Call,
-                    f(4, 2),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    eight_node(5, 2),
-                    "BTN call (vs EP)",
-                    Action::Call,
-                    f(5, 2),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    eight_node(6, 2),
-                    "SB call (vs EP)",
-                    Action::Call,
-                    f(6, 2),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    eight_node(7, 2),
-                    "BB call (vs EP)",
-                    Action::Call,
-                    f(7, 2),
-                    None,
-                    vec![],
-                ),
-            ],
-        ),
-        make_node(
-            eight_node(2, 0),
-            "MP push (folds)",
-            Action::Raise,
-            f(2, 0),
-            ev(2),
-            vec![
-                make_node(
-                    eight_node(3, 4),
-                    "HJ call (vs MP)",
-                    Action::Call,
-                    f(3, 4),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    eight_node(4, 4),
-                    "CO call (vs MP)",
-                    Action::Call,
-                    f(4, 4),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    eight_node(5, 4),
-                    "BTN call (vs MP)",
-                    Action::Call,
-                    f(5, 4),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    eight_node(6, 4),
-                    "SB call (vs MP)",
-                    Action::Call,
-                    f(6, 4),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    eight_node(7, 4),
-                    "BB call (vs MP)",
-                    Action::Call,
-                    f(7, 4),
-                    None,
-                    vec![],
-                ),
-            ],
-        ),
-        make_node(
-            eight_node(3, 0),
-            "HJ push (folds)",
-            Action::Raise,
-            f(3, 0),
-            ev(3),
-            vec![
-                make_node(
-                    eight_node(4, 8),
-                    "CO call (vs HJ)",
-                    Action::Call,
-                    f(4, 8),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    eight_node(5, 8),
-                    "BTN call (vs HJ)",
-                    Action::Call,
-                    f(5, 8),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    eight_node(6, 8),
-                    "SB call (vs HJ)",
-                    Action::Call,
-                    f(6, 8),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    eight_node(7, 8),
-                    "BB call (vs HJ)",
-                    Action::Call,
-                    f(7, 8),
-                    None,
-                    vec![],
-                ),
-            ],
-        ),
-        make_node(
-            eight_node(4, 0),
-            "CO push (folds)",
-            Action::Raise,
-            f(4, 0),
-            ev(4),
-            vec![
-                make_node(
-                    eight_node(5, 16),
-                    "BTN call (vs CO)",
-                    Action::Call,
-                    f(5, 16),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    eight_node(6, 16),
-                    "SB call (vs CO)",
-                    Action::Call,
-                    f(6, 16),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    eight_node(7, 16),
-                    "BB call (vs CO)",
-                    Action::Call,
-                    f(7, 16),
-                    None,
-                    vec![],
-                ),
-            ],
-        ),
-        make_node(
-            eight_node(5, 0),
-            "BTN push (folds)",
-            Action::Raise,
-            f(5, 0),
-            ev(5),
-            vec![
-                make_node(
-                    eight_node(6, 32),
-                    "SB call (vs BTN)",
-                    Action::Call,
-                    f(6, 32),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    eight_node(7, 32),
-                    "BB call (vs BTN)",
-                    Action::Call,
-                    f(7, 32),
-                    None,
-                    vec![],
-                ),
-            ],
-        ),
-        make_node(
-            eight_node(6, 0),
-            "SB push (folds)",
-            Action::Raise,
-            f(6, 0),
-            ev(6),
-            vec![make_node(
-                eight_node(7, 64),
-                "BB call (vs SB)",
-                Action::Call,
-                f(7, 64),
-                ev(7),
-                vec![],
-            )],
-        ),
-    ]
-}
-
-fn nine_max_seat(button_index: usize, role: usize) -> usize {
-    let button = button_index % 9;
-    match role {
-        0 => (button + 3) % 9,
-        1 => (button + 4) % 9,
-        2 => (button + 5) % 9,
-        3 => (button + 6) % 9,
-        4 => (button + 7) % 9,
-        5 => (button + 8) % 9,
-        6 => button,
-        7 => (button + 1) % 9,
-        _ => (button + 2) % 9,
-    }
-}
-
-fn nine_seat_ev(output: &SolverOutput, button_index: usize, role: usize) -> Option<[f64; 169]> {
-    output
-        .hand_evs
-        .get(nine_max_seat(button_index, role))
-        .copied()
-}
-
-fn freq_node9(ranges: &NineMaxRanges, actor: usize, mask: u32) -> [f64; 169] {
-    ranges.freq[nine_node(actor, mask)]
-}
-
-fn build_9max_tree(
-    ranges: &NineMaxRanges,
-    output: &SolverOutput,
-    button_index: usize,
-) -> Vec<TreeNode> {
-    let ev = |role: usize| nine_seat_ev(output, button_index, role);
-    let f = |actor: usize, mask: u32| freq_node9(ranges, actor, mask);
-    vec![
-        make_node(
-            nine_node(0, 0),
-            "UTG push",
-            Action::Raise,
-            f(0, 0),
-            ev(0),
-            vec![
-                make_node(
-                    nine_node(1, 1),
-                    "EP call (vs UTG)",
-                    Action::Call,
-                    f(1, 1),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    nine_node(2, 1),
-                    "MP1 call (vs UTG)",
-                    Action::Call,
-                    f(2, 1),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    nine_node(3, 1),
-                    "MP2 call (vs UTG)",
-                    Action::Call,
-                    f(3, 1),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    nine_node(4, 1),
-                    "HJ call (vs UTG)",
-                    Action::Call,
-                    f(4, 1),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    nine_node(5, 1),
-                    "CO call (vs UTG)",
-                    Action::Call,
-                    f(5, 1),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    nine_node(6, 1),
-                    "BTN call (vs UTG)",
-                    Action::Call,
-                    f(6, 1),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    nine_node(7, 1),
-                    "SB call (vs UTG)",
-                    Action::Call,
-                    f(7, 1),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    nine_node(8, 1),
-                    "BB call (vs UTG)",
-                    Action::Call,
-                    f(8, 1),
-                    None,
-                    vec![],
-                ),
-            ],
-        ),
-        make_node(
-            nine_node(1, 0),
-            "EP push (UTG fold)",
-            Action::Raise,
-            f(1, 0),
-            ev(1),
-            vec![
-                make_node(
-                    nine_node(2, 2),
-                    "MP1 call (vs EP)",
-                    Action::Call,
-                    f(2, 2),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    nine_node(3, 2),
-                    "MP2 call (vs EP)",
-                    Action::Call,
-                    f(3, 2),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    nine_node(4, 2),
-                    "HJ call (vs EP)",
-                    Action::Call,
-                    f(4, 2),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    nine_node(5, 2),
-                    "CO call (vs EP)",
-                    Action::Call,
-                    f(5, 2),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    nine_node(6, 2),
-                    "BTN call (vs EP)",
-                    Action::Call,
-                    f(6, 2),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    nine_node(7, 2),
-                    "SB call (vs EP)",
-                    Action::Call,
-                    f(7, 2),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    nine_node(8, 2),
-                    "BB call (vs EP)",
-                    Action::Call,
-                    f(8, 2),
-                    None,
-                    vec![],
-                ),
-            ],
-        ),
-        make_node(
-            nine_node(2, 0),
-            "MP1 push (folds)",
-            Action::Raise,
-            f(2, 0),
-            ev(2),
-            vec![
-                make_node(
-                    nine_node(3, 4),
-                    "MP2 call (vs MP1)",
-                    Action::Call,
-                    f(3, 4),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    nine_node(4, 4),
-                    "HJ call (vs MP1)",
-                    Action::Call,
-                    f(4, 4),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    nine_node(5, 4),
-                    "CO call (vs MP1)",
-                    Action::Call,
-                    f(5, 4),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    nine_node(6, 4),
-                    "BTN call (vs MP1)",
-                    Action::Call,
-                    f(6, 4),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    nine_node(7, 4),
-                    "SB call (vs MP1)",
-                    Action::Call,
-                    f(7, 4),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    nine_node(8, 4),
-                    "BB call (vs MP1)",
-                    Action::Call,
-                    f(8, 4),
-                    None,
-                    vec![],
-                ),
-            ],
-        ),
-        make_node(
-            nine_node(3, 0),
-            "MP2 push (folds)",
-            Action::Raise,
-            f(3, 0),
-            ev(3),
-            vec![
-                make_node(
-                    nine_node(4, 8),
-                    "HJ call (vs MP2)",
-                    Action::Call,
-                    f(4, 8),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    nine_node(5, 8),
-                    "CO call (vs MP2)",
-                    Action::Call,
-                    f(5, 8),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    nine_node(6, 8),
-                    "BTN call (vs MP2)",
-                    Action::Call,
-                    f(6, 8),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    nine_node(7, 8),
-                    "SB call (vs MP2)",
-                    Action::Call,
-                    f(7, 8),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    nine_node(8, 8),
-                    "BB call (vs MP2)",
-                    Action::Call,
-                    f(8, 8),
-                    None,
-                    vec![],
-                ),
-            ],
-        ),
-        make_node(
-            nine_node(4, 0),
-            "HJ push (folds)",
-            Action::Raise,
-            f(4, 0),
-            ev(4),
-            vec![
-                make_node(
-                    nine_node(5, 16),
-                    "CO call (vs HJ)",
-                    Action::Call,
-                    f(5, 16),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    nine_node(6, 16),
-                    "BTN call (vs HJ)",
-                    Action::Call,
-                    f(6, 16),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    nine_node(7, 16),
-                    "SB call (vs HJ)",
-                    Action::Call,
-                    f(7, 16),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    nine_node(8, 16),
-                    "BB call (vs HJ)",
-                    Action::Call,
-                    f(8, 16),
-                    None,
-                    vec![],
-                ),
-            ],
-        ),
-        make_node(
-            nine_node(5, 0),
-            "CO push (folds)",
-            Action::Raise,
-            f(5, 0),
-            ev(5),
-            vec![
-                make_node(
-                    nine_node(6, 32),
-                    "BTN call (vs CO)",
-                    Action::Call,
-                    f(6, 32),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    nine_node(7, 32),
-                    "SB call (vs CO)",
-                    Action::Call,
-                    f(7, 32),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    nine_node(8, 32),
-                    "BB call (vs CO)",
-                    Action::Call,
-                    f(8, 32),
-                    None,
-                    vec![],
-                ),
-            ],
-        ),
-        make_node(
-            nine_node(6, 0),
-            "BTN push (folds)",
-            Action::Raise,
-            f(6, 0),
-            ev(6),
-            vec![
-                make_node(
-                    nine_node(7, 64),
-                    "SB call (vs BTN)",
-                    Action::Call,
-                    f(7, 64),
-                    None,
-                    vec![],
-                ),
-                make_node(
-                    nine_node(8, 64),
-                    "BB call (vs BTN)",
-                    Action::Call,
-                    f(8, 64),
-                    None,
-                    vec![],
-                ),
-            ],
-        ),
-        make_node(
-            nine_node(7, 0),
-            "SB push (folds)",
-            Action::Raise,
-            f(7, 0),
-            ev(7),
-            vec![make_node(
-                nine_node(8, 128),
-                "BB call (vs SB)",
-                Action::Call,
-                f(8, 128),
-                ev(8),
-                vec![],
-            )],
-        ),
-    ]
-}
-
 fn build_hu_tree(output: &SolverOutput) -> Vec<TreeNode> {
     vec![make_node(
         0,
@@ -2118,6 +1031,7 @@ fn build_hu_tree(output: &SolverOutput) -> Vec<TreeNode> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use poker_core::{solve, Algorithm, EquityCache, SolverInput};
 
     fn empty_3max_ranges() -> ThreeMaxRanges {
         ThreeMaxRanges {
@@ -2236,6 +1150,269 @@ mod tests {
         evs[1][0] = 1.5;
         attach_node_evs(&mut tree, &evs);
         assert_eq!(tree[0].ev_range.unwrap()[0], 1.5);
+    }
+
+    #[test]
+    fn seven_max_tree_nests_threebet_and_bb_call() {
+        let stacks = [975.0, 695.0, 1560.0, 2515.0, 3340.0, 1505.0, 2910.0];
+        let tree = build_mask_tree(7, &stacks, 200.0, |_, _| [0.0; 169], seven_node);
+        assert_eq!(tree[0].player(), "UTG");
+        assert!(tree[0].action.is_raise());
+        let mp = &tree[0].children[0];
+        assert_eq!(mp.player(), "MP");
+        assert!(mp.action.is_call());
+        assert_eq!(
+            mp.children
+                .iter()
+                .map(|node| (node.player(), node.action, node.children.is_empty()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("HJ", Action::ThreeBet, true),
+                ("CO", Action::ThreeBet, true),
+                ("BTN", Action::ThreeBet, true),
+                ("SB", Action::ThreeBet, true),
+                ("BB", Action::Call, true),
+            ]
+        );
+        assert!((mp.children[4].amount_bb - 3.88).abs() < 0.02);
+        let hj = &tree[0].children[1];
+        assert_eq!(hj.player(), "HJ");
+        assert_eq!(hj.action, Action::ThreeBet);
+        let path = find_hero_decision_path(
+            &tree,
+            &[
+                ("UTG".to_string(), false),
+                ("MP".to_string(), true),
+                ("HJ".to_string(), false),
+                ("CO".to_string(), true),
+                ("BTN".to_string(), true),
+                ("SB".to_string(), true),
+            ],
+            "BB",
+        );
+        let node = node_at_path(&tree, &path.expect("bb path")).expect("bb node");
+        assert_eq!(node.player(), "BB");
+        assert!(node.action.is_call());
+        assert!(node.children.is_empty());
+        assert!((node.amount_bb - 6.80).abs() < 0.02);
+        assert_eq!(node.range_id, seven_node(6, 0b101));
+
+        let hj = &tree[2];
+        assert_eq!(hj.player(), "HJ");
+        assert!(hj.action.is_raise());
+        assert_eq!(
+            hj.children
+                .iter()
+                .map(|node| (node.player(), node.action, node.children.is_empty()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("CO", Action::ThreeBet, false),
+                ("BTN", Action::ThreeBet, false),
+                ("SB", Action::Call, false),
+                ("BB", Action::Call, true),
+            ]
+        );
+        assert_eq!(
+            hj.children[2]
+                .children
+                .iter()
+                .map(|node| (node.player(), node.action, node.children.is_empty()))
+                .collect::<Vec<_>>(),
+            vec![("BB", Action::Call, true)]
+        );
+        assert!((hj.children[2].children[0].amount_bb - 6.80).abs() < 0.02);
+        let co = &hj.children[0];
+        assert_eq!(
+            co.children
+                .iter()
+                .map(|node| (node.player(), node.action, node.children.is_empty()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("BTN", Action::FourBet, true),
+                ("SB", Action::Call, true),
+                ("BB", Action::Call, true),
+            ]
+        );
+        let btn = &co.children[0];
+        assert!((btn.amount_bb - 14.55).abs() < 0.02);
+        assert!(btn.children.is_empty());
+        assert_eq!(max_depth(&tree), 2);
+        let sb = &co.children[1];
+        assert!((sb.amount_bb - 7.03).abs() < 0.02);
+        assert!((co.children[2].amount_bb - 11.58).abs() < 0.02);
+
+        let mut tree = tree;
+        expand_path(&mut tree, &[2, 0, 1]);
+        assert!(!tree[0].expanded);
+        assert!(!tree[1].expanded);
+        assert!(tree[2].expanded);
+        assert!(tree[2].children[0].expanded);
+        assert!(!tree[2].children[0].children[0].expanded);
+        assert!(!tree[2].children[0].children[1].expanded);
+        assert!(!tree[3].expanded);
+    }
+
+    #[test]
+    fn amount_format_matches_hrc_decimals() {
+        assert_eq!(format_amount_bb(7.025), "7.03");
+        assert_eq!(format_amount_bb(12.575), "12.6");
+        assert_eq!(format_amount_bb(14.55), "14.6");
+        assert_eq!(format_amount_bb(7.80), "7.80");
+    }
+
+    fn max_depth(nodes: &[TreeNode]) -> usize {
+        nodes
+            .iter()
+            .map(|node| {
+                if node.children.is_empty() {
+                    0
+                } else {
+                    1 + max_depth(&node.children)
+                }
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn dump_tree(nodes: &[TreeNode], depth: usize) {
+        for node in nodes {
+            println!(
+                "{:indent$}{} {:>5} {:<3} {:>5.1}%  id={}  {}",
+                "",
+                node.action_code(),
+                format_amount_bb(node.amount_bb),
+                display_player(node.player()),
+                node.range_pct,
+                node.range_id,
+                range_notation(&node.range),
+                indent = depth * 2,
+            );
+            dump_tree(&node.children, depth + 1);
+        }
+    }
+
+    #[test]
+    fn hrc_7max_spot_matches_tree_and_ranges() {
+        let cache = EquityCache::from_bytes(include_bytes!("../../assets/equity_cache.bin"))
+            .expect("equity cache");
+        let input = SolverInput {
+            stacks: vec![975.0, 695.0, 1560.0, 2515.0, 3340.0, 1505.0, 2910.0],
+            payouts: vec![0.5, 0.3, 0.2],
+            small_blind: 100.0,
+            big_blind: 200.0,
+            ante: 0.0,
+            button_index: 4,
+            max_iterations: 80,
+            tolerance: 0.001,
+            num_players: 7,
+            verbose_convergence: false,
+            profile: false,
+            algorithm: Algorithm::Cfr7Max,
+            rank_cache_strict: false,
+            locked_ranges: HashMap::new(),
+        };
+        let output = solve(&input, &cache);
+        let tree = build_strategy_tree(&output, 4, &input.stacks, 200.0);
+        println!("=== our 7-max tree ===");
+        dump_tree(&tree, 0);
+
+        let utg = &tree[0];
+        assert_eq!(utg.player(), "UTG");
+        assert!(utg.action.is_raise());
+        let kids: Vec<_> = utg
+            .children
+            .iter()
+            .map(|n| {
+                (
+                    n.player(),
+                    n.action_code(),
+                    format_amount_bb(n.amount_bb),
+                    n.children.is_empty(),
+                    format!("{:.1}", n.range_pct),
+                )
+            })
+            .collect();
+        println!("UTG children: {kids:?}");
+        println!(
+            "HRC UTG: R 4.88 15.2% | C MP 3.48 9.2% | 3B HJ 7.80 4.7% | 3B CO 12.6 7.5% | 3B BU 14.6 7.5% | 3B SB 7.53 10.8% | C BB 3.88 ~20%"
+        );
+        println!(
+            "OURS UTG: R 4.88 {:.1}% | C MP 3.48 {:.1}% | 3B HJ 7.80 {:.1}% | 3B CO 12.6 {:.1}% | 3B BU 14.6 {:.1}% | 3B SB 7.53 {:.1}% | C BB 3.88 {:.1}%",
+            utg.range_pct,
+            utg.children[0].range_pct,
+            utg.children[1].range_pct,
+            utg.children[2].range_pct,
+            utg.children[3].range_pct,
+            utg.children[4].range_pct,
+            utg.children[5].range_pct,
+        );
+        let freq = &output.seven_max.as_ref().expect("7-max").freq;
+        for (label, idx) in [
+            ("UTG R", seven_node(0, 0)),
+            ("MP vs UTG", seven_node(1, 1)),
+            ("HJ vs UTG", seven_node(2, 1)),
+            ("HJ vs UTG+MP", seven_node(2, 3)),
+            ("CO vs UTG+MP", seven_node(3, 3)),
+            ("BU vs UTG+MP", seven_node(4, 3)),
+            ("SB vs UTG+MP", seven_node(5, 3)),
+            ("BB vs UTG+MP", seven_node(6, 3)),
+            ("CO vs UTG+HJ", seven_node(3, 0b101)),
+            ("BU vs UTG+HJ", seven_node(4, 0b101)),
+            ("SB vs UTG+HJ", seven_node(5, 0b101)),
+            ("BB vs UTG+HJ", seven_node(6, 0b101)),
+            ("CO vs UTG", seven_node(3, 1)),
+            ("BB vs UTG", seven_node(6, 1)),
+        ] {
+            let row = &freq[idx];
+            let max = row.iter().copied().fold(0.0, f64::max);
+            println!(
+                "{label:16} id={idx:3} share={:.1}% max={:.2}",
+                combo_share(row) * 100.0,
+                max
+            );
+        }
+        assert_eq!(max_depth(&tree), 2);
+        assert_eq!(
+            kids.iter()
+                .map(|(p, a, amt, leaf, _)| (*p, *a, amt.as_str(), *leaf))
+                .collect::<Vec<_>>(),
+            vec![
+                ("MP", "C", "3.48", false),
+                ("HJ", "3B", "7.80", false),
+                ("CO", "3B", "12.6", false),
+                ("BTN", "3B", "14.6", false),
+                ("SB", "3B", "7.53", false),
+                ("BB", "C", "3.88", true),
+            ]
+        );
+        let mp = &utg.children[0];
+        assert!(
+            mp.children[0].range_pct > 1.5,
+            "HJ vs UTG+MP {:.1}% vs HRC 4.7%",
+            mp.children[0].range_pct
+        );
+        assert!(
+            mp.children[1].range_pct > 1.5,
+            "CO vs UTG+MP {:.1}% vs HRC 4.7%",
+            mp.children[1].range_pct
+        );
+        assert!(
+            utg.children[1].range_pct > 3.0,
+            "HJ vs UTG {:.1}% vs HRC 7.5%",
+            utg.children[1].range_pct
+        );
+        assert!(
+            utg.children[1].children[0].range_pct > 0.4,
+            "4B CO vs UTG+HJ {:.1}% vs HRC 2.1%",
+            utg.children[1].children[0].range_pct
+        );
+        assert!(
+            utg.children[1].children[3].range_pct < 35.0,
+            "BB vs UTG+HJ {:.1}% vs HRC 3.6%",
+            utg.children[1].children[3].range_pct
+        );
+        assert_eq!(utg.children[1].children[2].action, Action::Call);
+        assert!((utg.children[1].children[2].amount_bb - 7.03).abs() < 0.02);
     }
 }
 

@@ -14,7 +14,8 @@ use poker_core::{
 
 use crate::tabs::solver_tab::OpenHandRequest;
 use crate::tabs::strategy_tree::{
-    build_strategy_tree, find_hero_decision_path, node_at_path, Action,
+    build_strategy_tree, display_player, display_vs, find_hero_decision_path, format_amount_bb,
+    node_at_path, TreeNode,
 };
 use crate::widgets::{range_matrix_ui, MatrixMode};
 
@@ -692,7 +693,7 @@ impl ImportTab {
             });
         }
         for (index, name, stack, stack_bb, action) in rows {
-            let label = table_position_label(n, index);
+            let label = display_player(table_position_label(n, index));
             let values = [label, name, stack.as_str(), stack_bb.as_str(), action];
             draw_row(ui, &cols, &values, name == hand.hero_name, DiffMark::None);
         }
@@ -1429,25 +1430,24 @@ fn analyze_imported_hand(
         }
     };
 
-    let spot = if (5..=9).contains(&n) {
-        mask_spot(hand, &output)?
-    } else {
-        let actions_before = actions_before_hero(hand);
-        let tree = build_strategy_tree(
-            &output,
-            input.button_index,
-            &input.stacks,
-            input.big_blind,
-        );
-        let path = find_hero_decision_path(&tree, &actions_before, hero_label)?;
-        let node = node_at_path(&tree, &path)?;
-        Spot {
-            range: node.range,
-            evs: node.ev_range,
-            title: node.label.clone(),
-            is_raise: matches!(node.action, Action::Raise),
-        }
-    };
+    let actions_before = actions_before_hero(hand);
+    let tree = build_strategy_tree(
+        &output,
+        input.button_index,
+        &input.stacks,
+        input.big_blind,
+    );
+    let spot = find_hero_decision_path(&tree, &actions_before, hero_label)
+        .and_then(|path| {
+            let node = node_at_path(&tree, &path)?;
+            Some(Spot {
+                range: node.range,
+                evs: node.ev_range,
+                title: tree_spot_title(node),
+                is_raise: node.action.is_raise(),
+            })
+        })
+        .or_else(|| mask_spot(hand, &output))?;
     let took_action = if spot.is_raise {
         matches!(hero_action, HeroActionKind::Raise)
     } else {
@@ -1488,6 +1488,32 @@ struct Spot {
     is_raise: bool,
 }
 
+fn tree_spot_title(node: &TreeNode) -> String {
+    let verb = if node.action.is_raise() {
+        "raises"
+    } else {
+        "calls"
+    };
+    let player = display_player(node.player());
+    let vs = node
+        .label
+        .strip_prefix(node.player())
+        .unwrap_or("")
+        .trim()
+        .strip_prefix("vs ")
+        .unwrap_or("");
+    let against = if vs.is_empty() {
+        String::new()
+    } else {
+        format!(" against {}", display_vs(vs))
+    };
+    format!(
+        "{player} {verb} {}bb{against}: {:.1}%",
+        format_amount_bb(node.amount_bb),
+        node.range_pct
+    )
+}
+
 fn mask_spot(hand: &ImportedHand, output: &SolverOutput) -> Option<Spot> {
     let n = hand.players.len();
     let hero = hand.hero_player()?;
@@ -1495,13 +1521,21 @@ fn mask_spot(hand: &ImportedHand, output: &SolverOutput) -> Option<Spot> {
     let (mask, shovers) = prior_shove_mask(hand, hero_seat);
     let node = node_index(n, hero_seat, mask)?;
     let (range, evs) = ranges_at(output, n, node)?;
-    let opened = shovers.iter().any(|name| {
-        hand.players
-            .iter()
-            .find(|player| player.name == *name)
-            .is_some_and(|player| player.stack > hand.big_blind + 1e-9)
-    });
-    let is_raise = !opened && hero.stack > hand.big_blind + 1e-9;
+    let current_bet = shovers
+        .iter()
+        .filter_map(|label| {
+            hand.players.iter().find(|player| {
+                solver_seat_label(player.position, n) == Some(label.as_str())
+            })
+            .map(|player| player.stack)
+        })
+        .fold(0.0_f64, f64::max);
+    let someone_behind = hero_seat + 1 < n;
+    let is_raise = if current_bet <= hand.big_blind + 1e-9 {
+        hero.stack > hand.big_blind + 1e-9
+    } else {
+        hero.stack > current_bet + 1e-9 && someone_behind
+    };
     let hero_label = solver_seat_label(hero.position, n).unwrap_or("?");
     let title = if is_raise && shovers.is_empty() {
         format!("{hero_label} push")
@@ -2268,6 +2302,40 @@ Total pot 3183 | Rake 0
     fn minraise_then_shove_is_not_push_fold() {
         let hand = parse_imported_hand(OPEN_THEN_SHOVE).unwrap();
         assert!(!is_push_fold_spot(&hand));
+    }
+
+    #[test]
+    fn mask_spot_bb_covering_last_is_call_not_raise() {
+        let text = r"PokerStars Hand #1: Tournament #1, $0.42+$0.08 USD Hold'em No Limit - Level VI (100/200) - 2026/10/24 14:51:00 ET
+Table '1 1' 9-max Seat #5 is the button
+Seat 1: kakaluz (975 in chips)
+Seat 2: Metros (695 in chips)
+Seat 3: Metztl021 (1560 in chips)
+Seat 4: Marcelino_RB (2515 in chips)
+Seat 5: zoombee (3340 in chips)
+Seat 6: ediliiii (1505 in chips)
+Seat 7: bbcbcv3 (2910 in chips)
+ediliiii: posts small blind 100
+bbcbcv3: posts big blind 200
+*** HOLE CARDS ***
+Dealt to bbcbcv3 [Ah 2c]
+kakaluz: raises 775 to 975 and is all-in
+Metros: folds
+Metztl021: raises 585 to 1560 and is all-in
+Marcelino_RB: folds
+zoombee: folds
+ediliiii: folds
+bbcbcv3: folds
+*** SUMMARY ***
+Total pot 400 | Rake 0
+";
+        let hand = parse_imported_hand(text).unwrap();
+        let hero = hand.hero_player().unwrap();
+        let seat = solver_position_index(hero.position, hand.players.len()).unwrap();
+        let (mask, shovers) = prior_shove_mask(&hand, seat);
+        assert_eq!(shovers, vec!["UTG".to_string(), "HJ".to_string()]);
+        assert_eq!(mask, 0b101);
+        assert_eq!(seat, 6);
     }
 
     #[test]

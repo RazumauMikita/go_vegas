@@ -11,8 +11,9 @@ use poker_core::{
 
 use crate::tabs::import_tab::ImportTab;
 use crate::tabs::strategy_tree::{
-    build_strategy_tree, draw_strategy_tree, draw_strategy_tree_header, find_hero_decision_path,
-    node_at_path, node_at_path_mut, Action, NodePath, TreeNode,
+    build_strategy_tree, display_player, display_vs, draw_strategy_tree, draw_strategy_tree_header,
+    expand_path, find_hero_decision_path, format_amount_bb, node_at_path, node_at_path_mut, NodePath,
+    TreeNode,
 };
 use crate::util::format_duration;
 use crate::widgets::{
@@ -463,7 +464,7 @@ impl SolverHand {
 
         if self.result.is_some() && !self.tree.is_empty() {
             let window_width = ctx.screen_rect().width();
-            let min_width = 200.0;
+            let min_width = 320.0;
             let max_width = (window_width - 320.0).max(min_width + 80.0);
             let default_width = (window_width * 0.42).clamp(min_width, max_width);
             egui::SidePanel::left("strategy_tree_panel")
@@ -671,6 +672,9 @@ impl SolverHand {
                     }
                     if self.selected_path.is_none() && !self.tree.is_empty() {
                         self.selected_path = Some(vec![0]);
+                    }
+                    if let Some(path) = self.selected_path.clone() {
+                        expand_path(&mut self.tree, &path);
                     }
                     self.result = Some(result);
                     self.range_editor = None;
@@ -945,14 +949,31 @@ impl SolverHand {
                 let stacks_bb = self.tree_stack_bbs();
                 let (is_raise, title) = node_at_path(&self.tree, &path)
                     .map(|node| {
-                        let is_raise = matches!(node.action, Action::Raise);
-                        let amount = stacks_bb.get(node.player()).copied().unwrap_or(0.0);
+                        let is_raise = node.action.is_raise();
+                        let amount = if node.amount_bb > 0.0 {
+                            node.amount_bb
+                        } else {
+                            stacks_bb.get(node.player()).copied().unwrap_or(0.0)
+                        };
                         let verb = if is_raise { "raises" } else { "calls" };
+                        let player = display_player(node.player());
+                        let vs = node
+                            .label
+                            .strip_prefix(node.player())
+                            .unwrap_or("")
+                            .trim()
+                            .strip_prefix("vs ")
+                            .unwrap_or("");
+                        let against = if vs.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" against {}", display_vs(vs))
+                        };
                         (
                             is_raise,
                             format!(
-                                "{} {verb} {amount:.2}bb: {:.1}%",
-                                node.player(),
+                                "{player} {verb} {}bb{against}: {:.1}%",
+                                format_amount_bb(amount),
                                 node.range_pct
                             ),
                         )
@@ -1084,7 +1105,7 @@ impl SolverHand {
             ranking: rank_hands_for_slider(&node.range, node.ev_range.as_ref()),
             lock: self.locked_ranges.contains_key(&node.range_id),
             matrix_mode: MatrixMode::Frequency,
-            is_raise: matches!(node.action, Action::Raise),
+            is_raise: node.action.is_raise(),
         });
     }
 
@@ -1363,7 +1384,7 @@ impl SolverHand {
                 ui.end_row();
 
                 for index in 0..players {
-                    ui.label(position_label(players, index));
+                    ui.label(display_player(position_label(players, index)));
                     let stack_bb = result.input.stacks[index] / bb;
                     right_label(ui, &format!("{stack_bb:.2}"));
                     let eq_pre = result.eq_pre[index] * 100.0;
