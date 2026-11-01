@@ -1071,7 +1071,7 @@ fn equity_vs_live(
     if w > 0.0 {
         e / w
     } else {
-        0.5
+        shared.vs_random[hero]
     }
 }
 
