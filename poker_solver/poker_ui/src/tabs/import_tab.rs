@@ -173,7 +173,7 @@ impl ImportTab {
             matrix_mode: MatrixMode::Ev,
             last_settings: None,
             tournament_sort: None,
-            hand_sort: None,
+            hand_sort: Some((1, true)),
             outline_sort: None,
         }
     }
@@ -385,7 +385,12 @@ impl ImportTab {
         for tournament in &mut self.tournaments {
             tournament
                 .hands
-                .sort_by(|a, b| b.hand.datetime.cmp(&a.hand.datetime).then(b.hand.hand_id.cmp(&a.hand.hand_id)));
+                .sort_by(|a, b| {
+                    a.hand
+                        .datetime
+                        .cmp(&b.hand.datetime)
+                        .then(a.hand.hand_id.cmp(&b.hand.hand_id))
+                });
         }
         let added_tournaments = self.tournaments.len();
         self.status = format!(
@@ -467,12 +472,14 @@ impl ImportTab {
                     let tournament = &self.tournaments[index];
                     let buyin = format!("{:.2}+{:.2}", tournament.buy_in, tournament.fee);
                     let players = tournament.start_players.to_string();
+                    let start = datetime_minute(&tournament.start);
+                    let end = datetime_minute(&tournament.end);
                     let values = [
                         tournament.id.as_str(),
                         buyin.as_str(),
                         players.as_str(),
-                        tournament.start.as_str(),
-                        tournament.end.as_str(),
+                        start,
+                        end,
                     ];
                     let response = draw_row(
                         ui,
@@ -547,9 +554,10 @@ impl ImportTab {
                         .as_ref()
                         .map(|a| format!("{:+.2}", a.diff))
                         .unwrap_or_default();
+                    let datetime = datetime_minute(&hand.datetime);
                     let values = [
                         diff.as_str(),
-                        hand.datetime.as_str(),
+                        datetime,
                         cards,
                         action,
                         pos,
@@ -1425,7 +1433,12 @@ fn analyze_imported_hand(
         mask_spot(hand, &output)?
     } else {
         let actions_before = actions_before_hero(hand);
-        let tree = build_strategy_tree(&output, input.button_index);
+        let tree = build_strategy_tree(
+            &output,
+            input.button_index,
+            &input.stacks,
+            input.big_blind,
+        );
         let path = find_hero_decision_path(&tree, &actions_before, hero_label)?;
         let node = node_at_path(&tree, &path)?;
         Spot {
@@ -1482,10 +1495,20 @@ fn mask_spot(hand: &ImportedHand, output: &SolverOutput) -> Option<Spot> {
     let (mask, shovers) = prior_shove_mask(hand, hero_seat);
     let node = node_index(n, hero_seat, mask)?;
     let (range, evs) = ranges_at(output, n, node)?;
-    let is_raise = mask == 0;
+    let opened = shovers.iter().any(|name| {
+        hand.players
+            .iter()
+            .find(|player| player.name == *name)
+            .is_some_and(|player| player.stack > hand.big_blind + 1e-9)
+    });
+    let is_raise = !opened && hero.stack > hand.big_blind + 1e-9;
     let hero_label = solver_seat_label(hero.position, n).unwrap_or("?");
-    let title = if shovers.is_empty() {
+    let title = if is_raise && shovers.is_empty() {
         format!("{hero_label} push")
+    } else if is_raise {
+        format!("{hero_label} raise (vs {})", shovers.join("+"))
+    } else if shovers.is_empty() {
+        format!("{hero_label} call")
     } else {
         format!("{hero_label} call (vs {})", shovers.join("+"))
     };
@@ -1713,6 +1736,14 @@ fn default_prize_strings(players: usize) -> Vec<String> {
     }
 }
 
+fn datetime_minute(datetime: &str) -> &str {
+    if datetime.len() >= 19 && datetime.as_bytes()[16] == b':' {
+        &datetime[..16]
+    } else {
+        datetime
+    }
+}
+
 fn toggle_sort(sort: &mut Option<(usize, bool)>, col: usize, default_asc: bool) {
     *sort = match *sort {
         Some((current, asc)) if current == col => Some((current, !asc)),
@@ -1765,7 +1796,11 @@ fn hand_order(tournament: &ImportedTournament, sort: Option<(usize, bool)>) -> V
                 left.analysis.as_ref().map(|item| item.diff),
                 right.analysis.as_ref().map(|item| item.diff),
             ),
-            1 => left.hand.datetime.cmp(&right.hand.datetime),
+            1 => left
+                .hand
+                .datetime
+                .cmp(&right.hand.datetime)
+                .then(left.hand.hand_id.cmp(&right.hand.hand_id)),
             2 => left
                 .hand
                 .hero_combo_label
@@ -2178,7 +2213,7 @@ fn paint_mistake_mark(painter: &egui::Painter, rect: egui::Rect) {
 
 #[cfg(test)]
 mod spot_filter_tests {
-    use super::{is_push_fold_spot, prior_shove_mask};
+    use super::{datetime_minute, is_push_fold_spot, prior_shove_mask};
     use poker_core::{parse_imported_hand, solver_position_index};
 
     const OPEN_THEN_SHOVE: &str = r"PokerStars Hand #262330970830: Tournament #4038016204, $0.42+$0.08 USD Hold'em No Limit - Level V (75/150) - 2026/10/07 20:59:08 ET
@@ -2245,6 +2280,13 @@ Total pot 3183 | Rake 0
         assert_eq!(seat, 3);
         assert_eq!(mask, 0b101);
         assert_eq!(shovers, vec!["UTG".to_string(), "MP".to_string()]);
+    }
+
+    #[test]
+    fn datetime_minute_strips_seconds() {
+        assert_eq!(datetime_minute("2026-10-24 14:37:05"), "2026-10-24 14:37");
+        assert_eq!(datetime_minute("2026-10-24 14:37"), "2026-10-24 14:37");
+        assert!("2026-10-24 14:37:05" < "2026-10-24 14:37:40");
     }
 }
 

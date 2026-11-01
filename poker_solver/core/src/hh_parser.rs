@@ -457,7 +457,7 @@ pub fn parse_imported_hand(text: &str) -> Result<ImportedHand, ParseError> {
 
     let datetime = RE_DATETIME
         .captures(text)
-        .map(|c| format!("{}-{}-{} {}:{}", &c[1], &c[2], &c[3], &c[4], &c[5]))
+        .map(|c| format!("{}-{}-{} {}:{}:{}", &c[1], &c[2], &c[3], &c[4], &c[5], &c[6]))
         .unwrap_or_default();
 
     let (hero_name, hero_cards) = match RE_DEALT.captures(text) {
@@ -570,6 +570,7 @@ impl ImportedHand {
             .players
             .iter()
             .filter(|p| p.name != self.hero_name)
+            .filter(|p| !self.folded_before_hero(&p.name))
             .map(|p| p.stack)
             .fold(0.0_f64, f64::max);
         if max_other <= 0.0 {
@@ -577,6 +578,13 @@ impl ImportedHand {
         } else {
             hero.stack.min(max_other) / bb
         }
+    }
+
+    fn folded_before_hero(&self, name: &str) -> bool {
+        self.preflop_actions
+            .iter()
+            .take_while(|action| action.name != self.hero_name)
+            .any(|action| action.name == name && matches!(action.kind, HeroActionKind::Fold))
     }
 
     pub fn hero_stack_bb(&self) -> f64 {
@@ -845,7 +853,7 @@ Total pot 3160 | Rake 0
         let hand = parse_imported_hand(text).expect("imported");
         assert_eq!(hand.hand_id, "262256461738");
         assert_eq!(hand.tournament_id, "4036170758");
-        assert_eq!(hand.datetime, "2026-09-30 18:40");
+        assert_eq!(hand.datetime, "2026-09-30 18:40:06");
         assert_eq!(hand.hero_name, "bbcbcv3");
         assert_eq!(hand.hero_combo_label.as_deref(), Some("AKo"));
         assert_eq!(hand.hero_action, Some(HeroActionKind::Raise));
@@ -853,6 +861,67 @@ Total pot 3160 | Rake 0
         let hero = hand.hero_player().expect("hero");
         assert_eq!(hero.position, Position::UTG);
         assert!((hand.hero_stack_bb() - 75.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn effective_bb_uses_remaining_opponent_not_hero_stack() {
+        let text = r"PokerStars Hand #1: Tournament #1, $0.42+$0.08 USD Hold'em No Limit - Level III (50/100) - 2026/10/24 14:37:00 ET
+Table '1 1' 9-max Seat #6 is the button
+Seat 1: Green_Duck_99 (1755 in chips)
+Seat 2: kakaluz (1770 in chips)
+Seat 3: 2Metros182 (1120 in chips)
+Seat 4: Metztl021 (1485 in chips)
+Seat 5: Marcelino_RB (3090 in chips)
+Seat 6: zoombee (1250 in chips)
+Seat 7: ediliiii (1375 in chips)
+Seat 8: bbcbcv3 (1655 in chips)
+ediliiii: posts small blind 50
+bbcbcv3: posts big blind 100
+*** HOLE CARDS ***
+Dealt to bbcbcv3 [Ad 4c]
+Green_Duck_99: folds
+kakaluz: folds
+2Metros182: raises 1020 to 1120 and is all-in
+Metztl021: folds
+Marcelino_RB: folds
+zoombee: folds
+ediliiii: folds
+bbcbcv3: folds
+*** SUMMARY ***
+Total pot 250 | Rake 0
+";
+        let hand = parse_imported_hand(text).expect("imported");
+        assert!((hand.hero_stack_bb() - 16.55).abs() < 1e-9);
+        assert!(
+            (hand.effective_bb() - 11.20).abs() < 1e-9,
+            "effective {} should be the remaining shove, not hero stack",
+            hand.effective_bb()
+        );
+    }
+
+    #[test]
+    fn effective_bb_keeps_hero_when_covered_by_remaining_player() {
+        let text = r"PokerStars Hand #2: Tournament #1, $0.42+$0.08 USD Hold'em No Limit - Level III (50/100) - 2026/10/24 14:36:00 ET
+Table '1 1' 9-max Seat #6 is the button
+Seat 1: Green_Duck_99 (1755 in chips)
+Seat 2: kakaluz (1770 in chips)
+Seat 3: 2Metros182 (1120 in chips)
+Seat 4: Metztl021 (1485 in chips)
+Seat 5: Marcelino_RB (3090 in chips)
+Seat 6: zoombee (1250 in chips)
+Seat 7: ediliiii (1375 in chips)
+Seat 8: bbcbcv3 (1655 in chips)
+ediliiii: posts small blind 50
+bbcbcv3: posts big blind 100
+*** HOLE CARDS ***
+Dealt to Green_Duck_99 [As Kd]
+Green_Duck_99: folds
+*** SUMMARY ***
+Total pot 150 | Rake 0
+";
+        let hand = parse_imported_hand(text).expect("imported");
+        assert!((hand.hero_stack_bb() - 17.55).abs() < 1e-9);
+        assert!((hand.effective_bb() - 17.55).abs() < 1e-9);
     }
 
     #[test]

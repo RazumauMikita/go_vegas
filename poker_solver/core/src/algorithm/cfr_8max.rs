@@ -94,6 +94,7 @@ struct Shared {
     bucket: [u8; HAND_TYPES],
     bucket_mask: [u64; BUCKETS],
     three: ThreeWayRankCache,
+    vs_random: [f64; HAND_TYPES],
 }
 
 pub fn apply_permutation_5way(perm: usize, contested: [f64; 5], uncalled: [f64; 5]) -> [f64; 5] {
@@ -1092,24 +1093,92 @@ impl Model {
         }
 
         for term in &self.fives {
-            fill_mean(&term.icm, &mut by_mask[term.mask as usize]);
+            fill_strength(term.mask, &term.icm, shared, &mut by_mask[term.mask as usize]);
         }
         for term in &self.sixes {
-            fill_mean(&term.icm, &mut by_mask[term.mask as usize]);
+            fill_strength(term.mask, &term.icm, shared, &mut by_mask[term.mask as usize]);
         }
         for term in &self.sevens {
-            fill_mean(&term.icm, &mut by_mask[term.mask as usize]);
+            fill_strength(term.mask, &term.icm, shared, &mut by_mask[term.mask as usize]);
         }
-        fill_mean(&self.eight_icm, &mut by_mask[255]);
+        fill_strength(255, &self.eight_icm, shared, &mut by_mask[255]);
 
         Terminals { by_mask }
     }
 }
 
-fn fill_mean(icm: &[[f64; PLAYERS]], out: &mut [[f64; HAND_TYPES]; PLAYERS]) {
+fn fill_strength(
+    mask: u32,
+    icm: &[[f64; PLAYERS]],
+    shared: &Shared,
+    out: &mut [[f64; HAND_TYPES]; PLAYERS],
+) {
     let mean = mean_icm(icm);
+    let n = mask.count_ones() as usize;
+    if n < 2 || icm.is_empty() {
+        for seat in 0..PLAYERS {
+            out[seat] = [mean[seat]; HAND_TYPES];
+        }
+        return;
+    }
+
+    let seats: Vec<usize> = (0..PLAYERS).filter(|&i| mask & (1 << i) != 0).collect();
+    let mut win = [0.0; PLAYERS];
+    let mut lose = [0.0; PLAYERS];
+    let mut n_win = [0.0; PLAYERS];
+    let mut n_lose = [0.0; PLAYERS];
+    for (perm, row) in icm.iter().enumerate() {
+        let winner = seats[perm_winner_slot(n, perm)];
+        for seat in 0..PLAYERS {
+            if seat == winner {
+                win[seat] += row[seat];
+                n_win[seat] += 1.0;
+            } else {
+                lose[seat] += row[seat];
+                n_lose[seat] += 1.0;
+            }
+        }
+    }
+
     for seat in 0..PLAYERS {
-        out[seat] = [mean[seat]; HAND_TYPES];
+        if mask & (1 << seat) == 0 {
+            out[seat] = [mean[seat]; HAND_TYPES];
+            continue;
+        }
+        let first = if n_win[seat] > 0.0 {
+            win[seat] / n_win[seat]
+        } else {
+            mean[seat]
+        };
+        let rest = if n_lose[seat] > 0.0 {
+            lose[seat] / n_lose[seat]
+        } else {
+            mean[seat]
+        };
+        for hand in 0..HAND_TYPES {
+            let p = place_first_prob(shared.vs_random[hand], n);
+            out[seat][hand] = p * first + (1.0 - p) * rest;
+        }
+    }
+}
+
+fn perm_winner_slot(n: usize, perm: usize) -> usize {
+    match n {
+        5 => perm5()[perm.min(119)][0],
+        6 => perm6()[perm.min(719)][0],
+        7 => perm7()[perm.min(5039)][0],
+        8 => perm8()[perm.min(40319)][0],
+        _ => 0,
+    }
+}
+
+fn place_first_prob(equity: f64, n_players: usize) -> f64 {
+    let e = equity.clamp(1e-6, 1.0 - 1e-6);
+    let k = n_players.saturating_sub(1) as f64;
+    if k <= 0.0 {
+        1.0
+    } else {
+        e / (e + k * (1.0 - e))
     }
 }
 
@@ -1819,6 +1888,23 @@ impl Shared {
             }
         }
 
+        let mut vs_random = [0.5; HAND_TYPES];
+        for hand in 0..HAND_TYPES {
+            let mut weight = 0.0;
+            let mut equity_sum = 0.0;
+            for other in 0..HAND_TYPES {
+                if block[hand][other] {
+                    continue;
+                }
+                let w = combos[other];
+                weight += w;
+                equity_sum += w * f64::from(equity[hand * HAND_TYPES + other]);
+            }
+            if weight > 0.0 {
+                vs_random[hand] = equity_sum / weight;
+            }
+        }
+
         Ok(Self {
             equity,
             combos,
@@ -1827,6 +1913,7 @@ impl Shared {
             bucket,
             bucket_mask,
             three,
+            vs_random,
         })
     }
 }
@@ -1903,6 +1990,14 @@ mod tests {
                 "seat {i}: got {got:?} expected {expected:?}"
             );
         }
+    }
+
+    #[test]
+    fn stronger_hands_win_multiway_more_often() {
+        assert!(place_first_prob(0.85, 5) > place_first_prob(0.32, 5));
+        assert!(place_first_prob(0.85, 5) > 0.45);
+        assert!(place_first_prob(0.32, 5) < 0.20);
+        assert!(place_first_prob(0.85, 8) < place_first_prob(0.85, 5));
     }
 
     #[test]

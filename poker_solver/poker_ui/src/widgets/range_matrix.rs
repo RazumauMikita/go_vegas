@@ -5,11 +5,12 @@ const GRID_GAP: f32 = 1.0;
 const BAR_H: f32 = 20.0;
 const HEADER_H: f32 = 24.0;
 const IN_RANGE_EPS: f64 = 0.5;
+const IN_STRATEGY_EPS: f64 = 0.05;
+const FREQ_DISPLAY_EPS: f64 = 0.02;
 
 const HRC_GREEN: egui::Color32 = egui::Color32::from_rgb(110, 198, 82);
 const HRC_RED: egui::Color32 = egui::Color32::from_rgb(240, 148, 148);
 const HRC_WHITE: egui::Color32 = egui::Color32::from_rgb(252, 252, 252);
-const HRC_PURPLE: egui::Color32 = egui::Color32::from_rgb(186, 88, 186);
 const HRC_FOLD: egui::Color32 = egui::Color32::from_rgb(196, 196, 196);
 const HRC_HEADER: egui::Color32 = egui::Color32::from_rgb(70, 141, 196);
 const TEXT_DARK: egui::Color32 = egui::Color32::from_rgb(32, 32, 32);
@@ -182,20 +183,29 @@ pub fn range_matrix_ui(
             let label = combo_label(matrix_combo_index(row, col));
             let rect = cell_rect(grid_rect, row, col, cell_w, cell_h);
 
+            let freq = range[idx].clamp(0.0, 1.0);
             let (bg, value) = match *mode {
                 MatrixMode::Frequency => {
-                    let freq = range[idx].clamp(0.0, 1.0);
-                    let color = lerp_color(HRC_WHITE, HRC_PURPLE, freq as f32);
-                    (color, format!("{:.0}", freq * 100.0))
+                    if freq < FREQ_DISPLAY_EPS {
+                        (HRC_WHITE, String::new())
+                    } else {
+                        (
+                            lerp_color(HRC_WHITE, HRC_GREEN, freq as f32),
+                            format!("{:.0}", freq * 100.0),
+                        )
+                    }
                 }
                 MatrixMode::Ev => {
                     if let Some(evs) = hand_evs {
                         let ev = evs[idx];
                         (ev_color(ev), format!("{ev:+.2}"))
+                    } else if freq < FREQ_DISPLAY_EPS {
+                        (HRC_WHITE, String::new())
                     } else {
-                        let freq = range[idx].clamp(0.0, 1.0);
-                        let color = lerp_color(HRC_WHITE, HRC_PURPLE, freq as f32);
-                        (color, format!("{:.0}", freq * 100.0))
+                        (
+                            lerp_color(HRC_WHITE, HRC_GREEN, freq as f32),
+                            format!("{:.0}", freq * 100.0),
+                        )
                     }
                 }
             };
@@ -215,6 +225,13 @@ pub fn range_matrix_ui(
                 egui::FontId::proportional(value_font),
                 TEXT_DARK,
             );
+            if *mode == MatrixMode::Ev && freq >= IN_STRATEGY_EPS {
+                ui.painter().rect_stroke(
+                    rect.shrink(0.5),
+                    0.0,
+                    egui::Stroke::new(1.6_f32, egui::Color32::BLACK),
+                );
+            }
             if highlight_combo == Some(idx) {
                 ui.painter().rect_stroke(
                     rect.shrink(0.5),
@@ -328,7 +345,7 @@ fn action_bar_ui(ui: &mut egui::Ui, share: f64, width: f32) {
         egui::Rect::from_min_size(rect.min + egui::vec2(fold_w, 0.0), egui::vec2(play_w, height));
 
     ui.painter().rect_filled(fold_rect, 0.0, HRC_FOLD);
-    ui.painter().rect_filled(play_rect, 0.0, HRC_PURPLE);
+    ui.painter().rect_filled(play_rect, 0.0, HRC_GREEN);
 
     if fold > 0.08 {
         ui.painter().text(

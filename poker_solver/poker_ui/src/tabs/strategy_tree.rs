@@ -2,9 +2,9 @@ use std::collections::HashMap;
 
 use egui::{Color32, FontId, Pos2, Rect, Sense, Ui};
 use poker_core::{
-    eight_node, five_node, nine_node, seven_node, six_node, EightMaxRanges, FiveMaxRanges,
-    FourMaxRanges, NineMaxRanges, SevenMaxRanges, SixMaxRanges, SolverOutput, ThreeMaxHandEvs,
-    ThreeMaxRanges,
+    eight_node, five_node, nine_node, seven_node, six_node, table_position_label, EightMaxRanges,
+    FiveMaxRanges, FourMaxRanges, NineMaxRanges, SevenMaxRanges, SixMaxRanges, SolverOutput,
+    ThreeMaxHandEvs, ThreeMaxRanges,
 };
 
 use crate::widgets::{combo_share, range_notation};
@@ -56,7 +56,12 @@ impl TreeNode {
     }
 }
 
-pub fn build_strategy_tree(output: &SolverOutput, button_index: usize) -> Vec<TreeNode> {
+pub fn build_strategy_tree(
+    output: &SolverOutput,
+    button_index: usize,
+    stacks: &[f64],
+    big_blind: f64,
+) -> Vec<TreeNode> {
     let mut tree = if let Some(ranges) = output.nine_max.as_ref() {
         let mut tree = build_9max_tree(ranges, output, button_index);
         attach_node_evs(&mut tree, &ranges.ev);
@@ -88,7 +93,43 @@ pub fn build_strategy_tree(output: &SolverOutput, button_index: usize) -> Vec<Tr
         build_hu_tree(output)
     };
     expand_one_level(&mut tree);
+    apply_short_stack_actions(&mut tree, stacks, big_blind);
     tree
+}
+
+fn apply_short_stack_actions(tree: &mut [TreeNode], stacks: &[f64], big_blind: f64) {
+    if stacks.is_empty() || big_blind <= 0.0 {
+        return;
+    }
+    let n = stacks.len();
+    let mut by_name = HashMap::new();
+    for (index, stack) in stacks.iter().enumerate() {
+        by_name.insert(table_position_label(n, index), *stack);
+    }
+    relabel_unopened(tree, &by_name, big_blind, true);
+}
+
+fn relabel_unopened(
+    tree: &mut [TreeNode],
+    stacks: &HashMap<&'static str, f64>,
+    big_blind: f64,
+    unopened: bool,
+) {
+    for node in tree {
+        let stack = stacks.get(node.player()).copied().unwrap_or(f64::INFINITY);
+        let can_raise = stack > big_blind + 1e-9;
+        if unopened {
+            node.action = if can_raise {
+                Action::Raise
+            } else {
+                Action::Call
+            };
+        } else if !matches!(node.action, Action::CallSpecial) {
+            node.action = Action::Call;
+        }
+        let child_unopened = unopened && !can_raise;
+        relabel_unopened(&mut node.children, stacks, big_blind, child_unopened);
+    }
 }
 
 fn attach_node_evs(tree: &mut [TreeNode], evs: &[[f64; 169]]) {
@@ -2153,6 +2194,32 @@ mod tests {
             "BB",
         );
         assert_eq!(path, Some(vec![0, 1]));
+    }
+
+    #[test]
+    fn short_unopened_stack_is_call_and_later_players_still_raise() {
+        let mut tree = vec![make_node(
+            0,
+            "UTG push",
+            Action::Raise,
+            [0.0; 169],
+            None,
+            vec![make_node(
+                1,
+                "EP call (vs UTG)",
+                Action::Call,
+                [0.0; 169],
+                None,
+                vec![],
+            )],
+        )];
+        apply_short_stack_actions(
+            &mut tree,
+            &[81.0, 523.0, 810.0, 2507.0, 820.0, 1707.0, 1266.0, 1287.0],
+            100.0,
+        );
+        assert!(matches!(tree[0].action, Action::Call));
+        assert!(matches!(tree[0].children[0].action, Action::Raise));
     }
 
     #[test]

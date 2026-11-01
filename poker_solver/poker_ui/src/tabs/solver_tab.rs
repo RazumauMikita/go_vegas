@@ -655,7 +655,12 @@ impl SolverHand {
         if let Some(rx) = &self.worker_rx {
             match rx.try_recv() {
                 Ok(SolverWorkerMessage::Done(result)) => {
-                    self.tree = build_strategy_tree(&result.output, result.input.button_index);
+                    self.tree = build_strategy_tree(
+                        &result.output,
+                        result.input.button_index,
+                        &result.input.stacks,
+                        result.input.big_blind,
+                    );
                     if let Some((actions, hero_label)) = self.pending_spot.take() {
                         self.selected_path =
                             find_hero_decision_path(&self.tree, &actions, &hero_label);
