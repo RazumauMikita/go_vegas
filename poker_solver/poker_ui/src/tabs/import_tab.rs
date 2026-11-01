@@ -1611,33 +1611,80 @@ fn is_push_fold_spot(hand: &ImportedHand) -> bool {
         return false;
     }
 
-    let mut facing_all_in = false;
-    let mut raised_short = false;
+    let mut all_in = false;
+    let mut short_raise = false;
+    let mut hero_seen = false;
+    let mut hero_faced_short_raise = false;
+    let mut hero_made_short_raise = false;
+    let mut hero_faced_limp = false;
+    let mut flat_of_short_raise = false;
+    let mut short_then_reraise = false;
+    let mut raise_after_hero = false;
+    let mut limp = false;
+    let mut covering_calls = 0;
+
     for action in &hand.preflop_actions {
         let is_hero = action.name == hand.hero_name;
+        if is_hero {
+            if short_raise && !all_in {
+                hero_faced_short_raise = true;
+            }
+            if limp && !short_raise && !all_in {
+                hero_faced_limp = true;
+            }
+            hero_seen = true;
+        }
         match action.kind {
             HeroActionKind::Fold | HeroActionKind::Check => {}
             HeroActionKind::Raise => {
-                if is_hero && !action.all_in {
-                    return false;
+                if hero_seen && !is_hero {
+                    raise_after_hero = true;
                 }
-                if raised_short {
-                    return false;
-                }
-                if action.all_in {
-                    facing_all_in = true;
+                if short_raise {
+                    short_then_reraise = true;
+                    if action.all_in {
+                        all_in = true;
+                    }
+                } else if action.all_in {
+                    all_in = true;
                 } else {
-                    raised_short = true;
+                    short_raise = true;
+                    if is_hero {
+                        hero_made_short_raise = true;
+                    }
                 }
             }
             HeroActionKind::Call => {
-                if facing_all_in || action.all_in {
-                    facing_all_in = true;
+                if all_in && !action.all_in {
+                    covering_calls += 1;
+                } else if all_in || action.all_in {
+                    all_in = true;
+                } else if short_raise {
+                    flat_of_short_raise = true;
                 } else {
-                    return false;
+                    limp = true;
+                }
+                if action.all_in {
+                    all_in = true;
                 }
             }
         }
+    }
+
+    if hero_faced_limp {
+        return false;
+    }
+    if covering_calls >= 2 {
+        return false;
+    }
+    if raise_after_hero && (flat_of_short_raise || short_then_reraise) {
+        return false;
+    }
+    if hero_faced_short_raise && (flat_of_short_raise || short_then_reraise) {
+        return false;
+    }
+    if hero_made_short_raise && (flat_of_short_raise || short_then_reraise) {
+        return false;
     }
     true
 }
@@ -2250,7 +2297,7 @@ fn paint_mistake_mark(painter: &egui::Painter, rect: egui::Rect) {
 #[cfg(test)]
 mod spot_filter_tests {
     use super::{datetime_minute, is_push_fold_spot, prior_shove_mask};
-    use poker_core::{parse_imported_hand, solver_position_index};
+    use poker_core::{parse_imported_hand, solver_position_index, HeroActionKind};
 
     const OPEN_THEN_SHOVE: &str = r"PokerStars Hand #262330970830: Tournament #4038016204, $0.42+$0.08 USD Hold'em No Limit - Level V (75/150) - 2026/10/07 20:59:08 ET
 Table '4038016204 1' 9-max Seat #8 is the button
@@ -2301,9 +2348,327 @@ Total pot 3183 | Rake 0
 ";
 
     #[test]
-    fn minraise_then_shove_is_not_push_fold() {
+    fn minraise_then_shove_after_hero_fold_is_not_push_fold() {
         let hand = parse_imported_hand(OPEN_THEN_SHOVE).unwrap();
         assert!(!is_push_fold_spot(&hand));
+    }
+
+    #[test]
+    fn fold_to_minraise_that_goes_to_flop_is_not_push_fold() {
+        let text = r"PokerStars Hand #262497923230: Tournament #4042188134, $0.42+$0.08 USD Hold'em No Limit - Level V (75/150) - 2026/10/24 14:03:41 ET
+Table '4042188134 1' 9-max Seat #2 is the button
+Seat 2: Kxngk00pa (365 in chips)
+Seat 7: bbcbcv3 (1613 in chips)
+Seat 8: cavalinho05 (8502 in chips)
+Seat 9: ninel7 (3020 in chips)
+bbcbcv3: posts small blind 75
+cavalinho05: posts big blind 150
+*** HOLE CARDS ***
+Dealt to bbcbcv3 [7c 2d]
+ninel7: raises 150 to 300
+Kxngk00pa: folds
+bbcbcv3: folds
+cavalinho05: calls 150
+*** FLOP *** [Ks 3d Qs]
+*** SUMMARY ***
+Total pot 1875 | Rake 0
+";
+        let hand = parse_imported_hand(text).unwrap();
+        assert_eq!(hand.hero_combo_label.as_deref(), Some("72o"));
+        assert_eq!(hand.hero_action, Some(HeroActionKind::Fold));
+        assert!(!is_push_fold_spot(&hand));
+    }
+
+    #[test]
+    fn first_in_fold_then_sb_complete_is_push_fold() {
+        let text = r"PokerStars Hand #262497881853: Tournament #4042188134, $0.42+$0.08 USD Hold'em No Limit - Level IV (50/100) - 2026/10/24 13:59:22 ET
+Table '4042188134 1' 9-max Seat #8 is the button
+Seat 2: Kxngk00pa (890 in chips) is sitting out
+Seat 3: Mytix1337 (315 in chips)
+Seat 4: TheGuessWho (2050 in chips)
+Seat 5: 11decopas (1095 in chips)
+Seat 7: bbcbcv3 (1388 in chips)
+Seat 8: cavalinho05 (5562 in chips)
+Seat 9: ninel7 (2200 in chips)
+ninel7: posts small blind 50
+Kxngk00pa: posts big blind 100
+*** HOLE CARDS ***
+Dealt to bbcbcv3 [4h 2s]
+Mytix1337: folds
+TheGuessWho: folds
+11decopas: folds
+bbcbcv3: folds
+cavalinho05: folds
+ninel7: calls 50
+Kxngk00pa: folds
+ninel7 collected 200 from pot
+*** SUMMARY ***
+Total pot 200 | Rake 0
+";
+        let hand = parse_imported_hand(text).unwrap();
+        assert_eq!(hand.hero_combo_label.as_deref(), Some("42o"));
+        assert_eq!(hand.hero_action, Some(HeroActionKind::Fold));
+        assert!(is_push_fold_spot(&hand));
+        assert!(hand.solver_stacks().is_some());
+        assert!(hand.effective_bb() < 15.0);
+    }
+
+    #[test]
+    fn first_in_fold_around_is_push_fold() {
+        let text = r"PokerStars Hand #262497862008: Tournament #4042188134, $0.42+$0.08 USD Hold'em No Limit - Level IV (50/100) - 2026/10/24 13:56:31 ET
+Table '4042188134 1' 9-max Seat #8 is the button
+Seat 2: Kxngk00pa (1240 in chips) is sitting out
+Seat 3: Mytix1337 (615 in chips)
+Seat 4: TheGuessWho (1850 in chips)
+Seat 5: 11decopas (1245 in chips)
+Seat 7: bbcbcv3 (1238 in chips)
+Seat 8: cavalinho05 (5412 in chips)
+Seat 9: ninel7 (1900 in chips)
+ninel7: posts small blind 50
+Kxngk00pa: posts big blind 100
+*** HOLE CARDS ***
+Dealt to bbcbcv3 [Qd 7c]
+Mytix1337: folds
+TheGuessWho: folds
+11decopas: folds
+bbcbcv3: folds
+cavalinho05: folds
+ninel7: folds
+Uncalled bet (50) returned to Kxngk00pa
+Kxngk00pa collected 100 from pot
+*** SUMMARY ***
+Total pot 100 | Rake 0
+";
+        let hand = parse_imported_hand(text).unwrap();
+        assert_eq!(hand.hero_combo_label.as_deref(), Some("Q7o"));
+        assert_eq!(hand.hero_action, Some(HeroActionKind::Fold));
+        assert!(is_push_fold_spot(&hand));
+        assert!(hand.solver_stacks().is_some());
+    }
+
+    #[test]
+    fn first_in_fold_then_later_open_is_not_push_fold() {
+        let text = r"PokerStars Hand #262497867155: Tournament #4042188134, $0.42+$0.08 USD Hold'em No Limit - Level IV (50/100) - 2026/10/24 13:57:16 ET
+Table '4042188134 1' 9-max Seat #2 is the button
+Seat 2: Kxngk00pa (890 in chips)
+Seat 3: Mytix1337 (515 in chips)
+Seat 4: TheGuessWho (1850 in chips)
+Seat 5: 11decopas (1245 in chips)
+Seat 7: bbcbcv3 (1238 in chips)
+Seat 8: cavalinho05 (5912 in chips)
+Seat 9: ninel7 (1850 in chips)
+Mytix1337: posts small blind 50
+TheGuessWho: posts big blind 100
+*** HOLE CARDS ***
+Dealt to bbcbcv3 [3c Jd]
+11decopas: folds
+bbcbcv3: folds
+cavalinho05: folds
+ninel7: raises 100 to 200
+Kxngk00pa: folds
+Mytix1337: calls 150
+TheGuessWho: folds
+*** FLOP *** [7h Js Kc]
+*** SUMMARY ***
+Total pot 500 | Rake 0
+";
+        let hand = parse_imported_hand(text).unwrap();
+        assert_eq!(hand.hero_combo_label.as_deref(), Some("J3o"));
+        assert!(!is_push_fold_spot(&hand));
+    }
+
+    #[test]
+    fn first_in_fold_then_uncontested_raise_is_push_fold() {
+        let text = r"PokerStars Hand #262497907260: Tournament #4042188134, $0.42+$0.08 USD Hold'em No Limit - Level V (75/150) - 2026/10/24 14:02:12 ET
+Table '4042188134 1' 9-max Seat #7 is the button
+Seat 2: Kxngk00pa (740 in chips)
+Seat 7: bbcbcv3 (1538 in chips)
+Seat 8: cavalinho05 (7752 in chips)
+Seat 9: ninel7 (3470 in chips)
+cavalinho05: posts small blind 75
+ninel7: posts big blind 150
+*** HOLE CARDS ***
+Dealt to bbcbcv3 [5d Jh]
+Kxngk00pa: folds
+bbcbcv3: folds
+cavalinho05: raises 600 to 750
+ninel7: folds
+Uncalled bet (600) returned to cavalinho05
+cavalinho05 collected 300 from pot
+*** SUMMARY ***
+Total pot 300 | Rake 0
+";
+        let hand = parse_imported_hand(text).unwrap();
+        assert_eq!(hand.hero_combo_label.as_deref(), Some("J5o"));
+        assert_eq!(hand.hero_action, Some(HeroActionKind::Fold));
+        assert!(is_push_fold_spot(&hand));
+        assert!(hand.effective_bb() < 15.0);
+    }
+
+    #[test]
+    fn hero_minraise_that_gets_called_is_not_push_fold() {
+        let text = r"PokerStars Hand #262498061204: Tournament #4042188134, $0.42+$0.08 USD Hold'em No Limit - Level VIII (150/300) - 2026/10/24 14:16:13 ET
+Table '4042188134 1' 9-max Seat #7 is the button
+Seat 7: bbcbcv3 (4679 in chips)
+Seat 8: cavalinho05 (8821 in chips)
+bbcbcv3: posts the ante 25
+cavalinho05: posts the ante 25
+bbcbcv3: posts small blind 150
+cavalinho05: posts big blind 300
+*** HOLE CARDS ***
+Dealt to bbcbcv3 [Qd Jh]
+bbcbcv3: raises 300 to 600
+cavalinho05: calls 300
+*** FLOP *** [8s 5s 2s]
+*** SUMMARY ***
+Total pot 1250 | Rake 0
+";
+        let hand = parse_imported_hand(text).unwrap();
+        assert_eq!(hand.hero_combo_label.as_deref(), Some("QJo"));
+        assert_eq!(hand.hero_action, Some(HeroActionKind::Raise));
+        assert!(!is_push_fold_spot(&hand));
+    }
+
+    #[test]
+    fn bb_walk_without_hero_action_is_not_push_fold() {
+        let text = r"PokerStars Hand #262497919126: Tournament #4042188134, $0.42+$0.08 USD Hold'em No Limit - Level V (75/150) - 2026/10/24 14:03:18 ET
+Table '4042188134 1' 9-max Seat #9 is the button
+Seat 2: Kxngk00pa (440 in chips)
+Seat 7: bbcbcv3 (1538 in chips)
+Seat 8: cavalinho05 (8502 in chips)
+Seat 9: ninel7 (3020 in chips)
+Kxngk00pa: posts small blind 75
+bbcbcv3: posts big blind 150
+*** HOLE CARDS ***
+Dealt to bbcbcv3 [Kc 3s]
+cavalinho05: folds
+ninel7: folds
+Kxngk00pa: folds
+Uncalled bet (75) returned to bbcbcv3
+bbcbcv3 collected 150 from pot
+*** SUMMARY ***
+Total pot 150 | Rake 0
+";
+        let hand = parse_imported_hand(text).unwrap();
+        assert_eq!(hand.hero_combo_label.as_deref(), Some("K3o"));
+        assert_eq!(hand.hero_action, None);
+        assert!(!is_push_fold_spot(&hand));
+    }
+
+    #[test]
+    fn fold_to_limps_is_not_push_fold() {
+        let text = r"PokerStars Hand #262497899525: Tournament #4042188134, $0.42+$0.08 USD Hold'em No Limit - Level V (75/150) - 2026/10/24 14:01:29 ET
+Table '4042188134 1' 9-max Seat #4 is the button
+Seat 2: Kxngk00pa (740 in chips)
+Seat 3: Mytix1337 (805 in chips)
+Seat 4: TheGuessWho (1510 in chips)
+Seat 7: bbcbcv3 (1613 in chips)
+Seat 8: cavalinho05 (5362 in chips)
+Seat 9: ninel7 (3470 in chips)
+bbcbcv3: posts small blind 75
+cavalinho05: posts big blind 150
+*** HOLE CARDS ***
+Dealt to bbcbcv3 [4d 5d]
+ninel7: folds
+Kxngk00pa: folds
+Mytix1337: calls 150
+TheGuessWho: calls 150
+bbcbcv3: folds
+cavalinho05: checks
+*** FLOP *** [7h Kh As]
+*** SUMMARY ***
+Total pot 3900 | Rake 0
+";
+        let hand = parse_imported_hand(text).unwrap();
+        assert_eq!(hand.hero_combo_label.as_deref(), Some("54s"));
+        assert!(!is_push_fold_spot(&hand));
+    }
+
+    #[test]
+    fn fold_btn_after_limps_is_not_push_fold() {
+        let text = r"PokerStars Hand #262496449515: Tournament #4042154830, $0.42+$0.08 USD Hold'em No Limit - Level V (75/150) - 2026/10/24 11:31:23 ET
+Table '4042154830 1' 9-max Seat #1 is the button
+Seat 1: bbcbcv3 (1542 in chips)
+Seat 2: Chignolli (691 in chips)
+Seat 3: 11decopas (1045 in chips)
+Seat 4: TheAnarchist7 (2155 in chips)
+Seat 6: Yassuki (3620 in chips)
+Seat 7: 99quebec1979 (1410 in chips)
+Seat 9: Gabriele2015 (3037 in chips)
+Chignolli: posts small blind 75
+11decopas: posts big blind 150
+*** HOLE CARDS ***
+Dealt to bbcbcv3 [7h 6h]
+TheAnarchist7: folds
+Yassuki: calls 150
+99quebec1979: folds
+Gabriele2015: calls 150
+bbcbcv3: folds
+Chignolli: calls 75
+11decopas: checks
+*** FLOP *** [6s Tc 4h]
+*** SUMMARY ***
+Total pot 600 | Rake 0
+";
+        let hand = parse_imported_hand(text).unwrap();
+        assert_eq!(hand.hero_combo_label.as_deref(), Some("76s"));
+        assert_eq!(hand.hero_action, Some(HeroActionKind::Fold));
+        assert!(!is_push_fold_spot(&hand));
+    }
+
+    #[test]
+    fn short_shove_with_two_covering_calls_is_not_push_fold() {
+        let text = r"PokerStars Hand #262498268877: Tournament #4042194019, $0.42+$0.08 USD Hold'em No Limit - Level VI (100/200) - 2026/10/24 14:35:11 ET
+Table '4042194019 1' 9-max Seat #6 is the button
+Seat 1: bbcbcv3 (3788 in chips)
+Seat 2: Kxngk00pa (327 in chips)
+Seat 5: Gibbo137 (4848 in chips)
+Seat 6: Miezie1995 (2453 in chips)
+Seat 8: patpaco57 (2084 in chips)
+patpaco57: posts small blind 100
+bbcbcv3: posts big blind 200
+*** HOLE CARDS ***
+Dealt to bbcbcv3 [9s Qs]
+Kxngk00pa: raises 127 to 327 and is all-in
+Gibbo137: folds
+Miezie1995: folds
+patpaco57: calls 227
+bbcbcv3: calls 127
+*** FLOP *** [2h Qh 3h]
+*** SUMMARY ***
+Total pot 981 | Rake 0
+";
+        let hand = parse_imported_hand(text).unwrap();
+        assert_eq!(hand.hero_combo_label.as_deref(), Some("Q9s"));
+        assert_eq!(hand.hero_action, Some(HeroActionKind::Call));
+        assert!(!is_push_fold_spot(&hand));
+    }
+
+    #[test]
+    fn hu_open_raise_that_wins_uncontested_is_push_fold() {
+        let text = r"PokerStars Hand #262498378100: Tournament #4042194019, $0.42+$0.08 USD Hold'em No Limit - Level VIII (150/300) - 2026/10/24 14:45:12 ET
+Table '4042194019 1' 9-max Seat #1 is the button
+Seat 1: bbcbcv3 (9395 in chips)
+Seat 5: Gibbo137 (4105 in chips)
+bbcbcv3: posts the ante 25
+Gibbo137: posts the ante 25
+bbcbcv3: posts small blind 150
+Gibbo137: posts big blind 300
+*** HOLE CARDS ***
+Dealt to bbcbcv3 [2c 8c]
+bbcbcv3: raises 450 to 750
+Gibbo137: folds
+Uncalled bet (450) returned to bbcbcv3
+bbcbcv3 collected 650 from pot
+*** SUMMARY ***
+Total pot 650 | Rake 0
+";
+        let hand = parse_imported_hand(text).unwrap();
+        assert_eq!(hand.players.len(), 2);
+        assert_eq!(hand.hero_combo_label.as_deref(), Some("82s"));
+        assert_eq!(hand.hero_action, Some(HeroActionKind::Raise));
+        assert!(is_push_fold_spot(&hand));
+        assert!(hand.effective_bb() < 15.0);
     }
 
     #[test]
