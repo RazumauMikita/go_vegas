@@ -147,6 +147,18 @@ pub fn build_strategy_tree(
     tree
 }
 
+fn min_raise_chips(big_blind: f64) -> f64 {
+    2.0 * big_blind
+}
+
+fn can_min_raise(stack: f64, big_blind: f64) -> bool {
+    stack + 1e-9 >= min_raise_chips(big_blind)
+}
+
+fn completes_only(stack: f64, big_blind: f64) -> bool {
+    stack <= big_blind + 1e-9
+}
+
 fn apply_short_stack_actions(tree: &mut [TreeNode], stacks: &[f64], big_blind: f64) {
     if stacks.is_empty() || big_blind <= 0.0 {
         return;
@@ -167,15 +179,14 @@ fn relabel_unopened(
 ) {
     for node in tree {
         let stack = stacks.get(node.player()).copied().unwrap_or(f64::INFINITY);
-        let can_raise = stack > big_blind + 1e-9;
         if unopened {
-            node.action = if can_raise {
+            node.action = if can_min_raise(stack, big_blind) {
                 Action::Raise
             } else {
                 Action::Call
             };
         }
-        let child_unopened = unopened && !can_raise;
+        let child_unopened = unopened && completes_only(stack, big_blind);
         relabel_unopened(&mut node.children, stacks, big_blind, child_unopened);
     }
 }
@@ -294,7 +305,13 @@ fn walk_spot(
     };
     let abs = skip + j;
     if *is_fold {
-        walk_spot(siblings, path, abs + 1, &remaining[1..], hero)
+        let mut next_skip = abs + 1;
+        while next_skip < siblings.len()
+            && node_depends_on_player(&siblings[next_skip], pos)
+        {
+            next_skip += 1;
+        }
+        walk_spot(siblings, path, next_skip, &remaining[1..], hero)
     } else if siblings[abs].children.is_empty() {
         None
     } else {
@@ -302,6 +319,20 @@ fn walk_spot(
         next.push(abs);
         walk_spot(&siblings[abs].children, next, 0, &remaining[1..], hero)
     }
+}
+
+fn node_depends_on_player(node: &TreeNode, player: &str) -> bool {
+    if node.player() == player {
+        return true;
+    }
+    let vs = node
+        .label
+        .strip_prefix(node.player())
+        .unwrap_or("")
+        .trim()
+        .strip_prefix("vs ")
+        .unwrap_or("");
+    vs.split(", ").any(|name| name == player)
 }
 
 pub fn draw_strategy_tree_header(ui: &mut Ui) {
@@ -629,14 +660,18 @@ where
     N: Fn(usize, u32) -> usize,
 {
     let stack = stacks.get(actor).copied().unwrap_or(0.0);
-    let opens = stack > big_blind + 1e-9;
-    let action = if opens {
+    let puts_in_more_than_bb = stack > big_blind + 1e-9;
+    let action = if can_min_raise(stack, big_blind) {
         Action::Raise
     } else {
         Action::Call
     };
-    let current_bet = if opens { stack } else { big_blind };
-    let raise_level = if opens { 1 } else { 0 };
+    let current_bet = if puts_in_more_than_bb {
+        stack
+    } else {
+        big_blind
+    };
+    let raise_level = if puts_in_more_than_bb { 1 } else { 0 };
     let children = response_nodes(
         n,
         1 << actor,
@@ -689,10 +724,11 @@ where
     } else {
         (Action::Call, raise_level, current_bet)
     };
+    let continue_mask = mask | (1 << next);
     let nested = if nest {
         response_nodes(
             n,
-            mask | (1 << next),
+            continue_mask,
             next + 1,
             new_level,
             new_bet,
@@ -724,6 +760,18 @@ where
         reraises,
     );
     let mut children = vec![continue_node];
+    if reraises {
+        children.extend(short_call_leaves(
+            n,
+            continue_mask,
+            next + 1,
+            new_bet,
+            stacks,
+            big_blind,
+            freq,
+            node_index,
+        ));
+    }
     children.extend(response_nodes(
         n,
         mask,
@@ -737,6 +785,50 @@ where
         node_index,
     ));
     children
+}
+
+fn short_call_leaves<F, N>(
+    n: usize,
+    mask: u32,
+    from: usize,
+    current_bet: f64,
+    stacks: &[f64],
+    big_blind: f64,
+    freq: &F,
+    node_index: &N,
+) -> Vec<TreeNode>
+where
+    F: Fn(usize, u32) -> [f64; 169],
+    N: Fn(usize, u32) -> usize,
+{
+    (from..n)
+        .filter(|&player| {
+            let stack = stacks.get(player).copied().unwrap_or(0.0);
+            !can_min_raise(stack, big_blind) && stack <= current_bet + 1e-9
+        })
+        .map(|player| {
+            let stack = stacks.get(player).copied().unwrap_or(0.0);
+            let mut node = make_node(
+                node_index(player, mask),
+                &mask_label(n, player, mask),
+                Action::Call,
+                freq(player, mask),
+                None,
+                Vec::new(),
+            );
+            node.amount_bb = action_amount_bb(
+                player,
+                n,
+                mask,
+                stack,
+                current_bet,
+                stacks,
+                big_blind,
+                false,
+            );
+            node
+        })
+        .collect()
 }
 
 fn reraise_action(level: u8) -> Action {
@@ -1134,6 +1226,85 @@ mod tests {
         );
         assert!(matches!(tree[0].action, Action::Call));
         assert!(matches!(tree[0].children[0].action, Action::Raise));
+    }
+
+    #[test]
+    fn stack_below_min_raise_is_unopened_call() {
+        let stacks = [2980.0, 1320.0, 3020.0, 885.0, 2140.0, 273.0, 1462.0, 1420.0];
+        let mut labeled = build_mask_tree(8, &stacks, 150.0, |_, _| [0.0; 169], eight_node);
+        apply_short_stack_actions(&mut labeled, &stacks, 150.0);
+
+        let btn = labeled.iter().find(|node| node.player() == "BTN").expect("BU");
+        assert_eq!(btn.action, Action::Call);
+        assert!((btn.amount_bb - 1.82).abs() < 0.02);
+
+        let hj = labeled.iter().find(|node| node.player() == "HJ").expect("HJ");
+        assert_eq!(hj.action, Action::Raise);
+        assert!((hj.amount_bb - 5.90).abs() < 0.02);
+
+        let hj_kids: Vec<_> = hj
+            .children
+            .iter()
+            .map(|node| (node.player(), node.action_code(), node.label.clone(), node.children.is_empty()))
+            .collect();
+        assert!(
+            hj_kids.iter().any(|(p, a, label, leaf)| {
+                *p == "BTN" && *a == "C" && label.contains("CO") && *leaf
+            }),
+            "HRC shows a leaf BU call vs HJ+CO, got {hj_kids:?}"
+        );
+
+        let bu_vs_hj = hj
+            .children
+            .iter()
+            .find(|node| node.player() == "BTN" && node.label.contains("HJ") && !node.label.contains("CO"))
+            .expect("BU vs HJ");
+        assert_eq!(bu_vs_hj.action, Action::Call);
+        assert!((bu_vs_hj.amount_bb - 1.82).abs() < 0.02);
+        assert!(
+            !bu_vs_hj.children.is_empty(),
+            "after short call SB/BB still act"
+        );
+        assert_eq!(bu_vs_hj.children[0].player(), "SB");
+        assert_eq!(bu_vs_hj.children[0].action, Action::ThreeBet);
+
+        let folded_to_bu = find_hero_decision_path(
+            &labeled,
+            &[
+                ("UTG".to_string(), true),
+                ("EP".to_string(), true),
+                ("MP".to_string(), true),
+                ("HJ".to_string(), true),
+                ("CO".to_string(), true),
+            ],
+            "BTN",
+        );
+        let unopened = node_at_path(&labeled, &folded_to_bu.expect("unopened BU"))
+            .expect("unopened node");
+        assert_eq!(unopened.player(), "BTN");
+        assert_eq!(unopened.action, Action::Call);
+        assert!(unopened.label.find("vs").is_none(), "{}", unopened.label);
+
+        let vs_hj = find_hero_decision_path(
+            &labeled,
+            &[
+                ("UTG".to_string(), true),
+                ("EP".to_string(), true),
+                ("MP".to_string(), true),
+                ("HJ".to_string(), false),
+                ("CO".to_string(), true),
+            ],
+            "BTN",
+        );
+        let facing = node_at_path(&labeled, &vs_hj.expect("BU vs HJ")).expect("vs HJ node");
+        assert_eq!(facing.player(), "BTN");
+        assert_eq!(facing.action, Action::Call);
+        assert!(facing.label.contains("HJ"), "{}", facing.label);
+        assert!(
+            !facing.label.contains("CO"),
+            "CO folded, should not be vs HJ+CO: {}",
+            facing.label
+        );
     }
 
     #[test]

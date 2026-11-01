@@ -19,9 +19,9 @@ use crate::solver::{
 use crate::three_way_rank_cache::ThreeWayRankCache;
 
 const DEFAULT_TOLERANCE: f64 = 0.005;
-const MIN_CONVERGENCE_ITERS: usize = 160;
-const THREE_LIVE: usize = 40;
-const FOUR_LIVE: usize = 12;
+const MIN_CONVERGENCE_ITERS: usize = 64;
+const THREE_LIVE: usize = 24;
+const FOUR_LIVE: usize = 8;
 const DCFR_ALPHA: f64 = 1.5;
 const DCFR_BETA: f64 = 0.5;
 const DCFR_GAMMA: f64 = 1.0;
@@ -1085,21 +1085,19 @@ fn hu_uncond(range_a: &[f64; HAND_TYPES], range_b: &[f64; HAND_TYPES], shared: &
     }
 }
 
-fn live_hands(range: &[f64; HAND_TYPES], cap: usize, shared: &Shared) -> Vec<usize> {
+fn live_hands(range: &[f64; HAND_TYPES], cap: usize, _shared: &Shared) -> Vec<usize> {
     let mut items: Vec<(usize, f64)> = (0..HAND_TYPES)
         .filter_map(|h| {
-            let w = shared.combos[h] * range[h].clamp(0.0, 1.0);
-            (w > 1e-4).then_some((h, w))
+            let freq = range[h].clamp(0.0, 1.0);
+            (freq > 1e-4).then_some((h, freq))
         })
         .collect();
-    items.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    let mut live: Vec<usize> = items.into_iter().take(cap).map(|(h, _)| h).collect();
-    for pair in 0..13 {
-        if !live.contains(&pair) {
-            live.push(pair);
-        }
-    }
-    live
+    items.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    items.into_iter().take(cap).map(|(h, _)| h).collect()
 }
 
 fn live_buckets(mass: &[f64; BUCKETS], cap: usize) -> Vec<usize> {
@@ -1123,24 +1121,12 @@ fn fill_three(
         for h in 0..HAND_TYPES {
             weight[slot][h] = shared.combos[h] * ranges[slot][h].clamp(0.0, 1.0);
         }
-        for pair in 0..13 {
-            if weight[slot][pair] <= 1e-12 {
-                weight[slot][pair] = shared.combos[pair] * 1e-6;
-            }
-        }
     }
-    let mut live = [
+    let live = [
         live_hands(ranges[0], THREE_LIVE, shared),
         live_hands(ranges[1], THREE_LIVE, shared),
         live_hands(ranges[2], THREE_LIVE, shared),
     ];
-    for slot in 0..3 {
-        for pair in 0..13 {
-            if !live[slot].contains(&pair) {
-                live[slot].push(pair);
-            }
-        }
-    }
     let mut num = [[0.0; HAND_TYPES]; 3];
     let mut den = [[0.0; HAND_TYPES]; 3];
     let mut folder_num = [0.0; PLAYERS];
@@ -1188,8 +1174,6 @@ fn fill_three(
         }
     }
 
-    fill_three_missing(&mut num, &mut den, &live, &weight, seats, icm, shared);
-
     let fallback = mean_seat(icm);
     for slot in 0..3 {
         let seat = seats[slot];
@@ -1208,66 +1192,6 @@ fn fill_three(
             fallback[folder]
         };
         out[folder] = [ev; HAND_TYPES];
-    }
-}
-
-fn fill_three_missing(
-    num: &mut [[f64; HAND_TYPES]; 3],
-    den: &mut [[f64; HAND_TYPES]; 3],
-    live: &[Vec<usize>; 3],
-    weight: &[[f64; HAND_TYPES]; 3],
-    seats: [usize; 3],
-    icm: &[[f64; PLAYERS]; 6],
-    shared: &Shared,
-) {
-    let others = [[1usize, 2], [0, 2], [0, 1]];
-    for slot in 0..3 {
-        let o1 = others[slot][0];
-        let o2 = others[slot][1];
-        if live[o1].is_empty() || live[o2].is_empty() {
-            continue;
-        }
-        for h in 0..HAND_TYPES {
-            if den[slot][h] > 0.0 {
-                continue;
-            }
-            let mut n = 0.0;
-            let mut d = 0.0;
-            for &h1 in &live[o1] {
-                if shared.block[h][h1] {
-                    continue;
-                }
-                let w1 = weight[o1][h1];
-                if w1 <= 0.0 {
-                    continue;
-                }
-                for &h2 in &live[o2] {
-                    if shared.block[h][h2] || shared.block[h1][h2] {
-                        continue;
-                    }
-                    let w2 = weight[o2][h2];
-                    if w2 <= 0.0 {
-                        continue;
-                    }
-                    let (a, b, c) = match slot {
-                        0 => (h, h1, h2),
-                        1 => (h1, h, h2),
-                        _ => (h1, h2, h),
-                    };
-                    let probs = shared
-                        .three
-                        .get(a as u8, b as u8, c as u8)
-                        .unwrap_or([1.0 / 6.0; 6]);
-                    let w = w1 * w2;
-                    n += w * dot_icm(&probs, icm, seats[slot]);
-                    d += w;
-                }
-            }
-            if d > 0.0 {
-                num[slot][h] = n;
-                den[slot][h] = d;
-            }
-        }
     }
 }
 

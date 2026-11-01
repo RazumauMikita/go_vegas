@@ -1534,7 +1534,7 @@ fn mask_spot(hand: &ImportedHand, output: &SolverOutput) -> Option<Spot> {
         .fold(0.0_f64, f64::max);
     let someone_behind = hero_seat + 1 < n;
     let is_raise = if current_bet <= hand.big_blind + 1e-9 {
-        hero.stack > hand.big_blind + 1e-9
+        hero.stack + 1e-9 >= 2.0 * hand.big_blind
     } else {
         hero.stack > current_bet + 1e-9 && someone_behind
     };
@@ -1780,7 +1780,8 @@ fn iterations_for(players: usize) -> usize {
     match players {
         2 | 3 => 150,
         4 | 5 => 80,
-        _ => 40,
+        6 | 7 => 80,
+        _ => 80,
     }
 }
 

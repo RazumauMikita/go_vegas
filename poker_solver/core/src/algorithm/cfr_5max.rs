@@ -19,9 +19,9 @@ use crate::solver::{
 use crate::three_way_rank_cache::ThreeWayRankCache;
 
 const DEFAULT_TOLERANCE: f64 = 0.005;
-const MIN_CONVERGENCE_ITERS: usize = 160;
-const THREE_LIVE: usize = 40;
-const FOUR_LIVE: usize = 12;
+const MIN_CONVERGENCE_ITERS: usize = 64;
+const THREE_LIVE: usize = 24;
+const FOUR_LIVE: usize = 8;
 const FIVE_LIVE: usize = 8;
 const DCFR_ALPHA: f64 = 1.5;
 const DCFR_BETA: f64 = 0.5;
@@ -887,14 +887,18 @@ fn hu_uncond(range_a: &[f64; HAND_TYPES], range_b: &[f64; HAND_TYPES], shared: &
     }
 }
 
-fn live_hands(range: &[f64; HAND_TYPES], cap: usize, shared: &Shared) -> Vec<usize> {
+fn live_hands(range: &[f64; HAND_TYPES], cap: usize, _shared: &Shared) -> Vec<usize> {
     let mut items: Vec<(usize, f64)> = (0..HAND_TYPES)
         .filter_map(|h| {
-            let w = shared.combos[h] * range[h].clamp(0.0, 1.0);
-            (w > 1e-4).then_some((h, w))
+            let freq = range[h].clamp(0.0, 1.0);
+            (freq > 1e-4).then_some((h, freq))
         })
         .collect();
-    items.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    items.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
     items.into_iter().take(cap).map(|(h, _)| h).collect()
 }
 

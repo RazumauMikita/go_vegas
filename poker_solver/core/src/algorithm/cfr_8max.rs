@@ -19,9 +19,9 @@ use crate::solver::{
 use crate::three_way_rank_cache::ThreeWayRankCache;
 
 const DEFAULT_TOLERANCE: f64 = 0.005;
-const MIN_CONVERGENCE_ITERS: usize = 160;
-const THREE_LIVE: usize = 40;
-const FOUR_LIVE: usize = 12;
+const MIN_CONVERGENCE_ITERS: usize = 64;
+const THREE_LIVE: usize = 24;
+const FOUR_LIVE: usize = 8;
 const DCFR_ALPHA: f64 = 1.5;
 const DCFR_BETA: f64 = 0.5;
 const DCFR_GAMMA: f64 = 1.0;
@@ -1257,15 +1257,45 @@ fn hu_uncond(range_a: &[f64; HAND_TYPES], range_b: &[f64; HAND_TYPES], shared: &
     }
 }
 
+fn equity_vs_live(
+    hero: usize,
+    live: &[usize],
+    weight: &[f64; HAND_TYPES],
+    shared: &Shared,
+) -> f64 {
+    let mut w = 0.0;
+    let mut e = 0.0;
+    for &v in live {
+        if shared.block[hero][v] {
+            continue;
+        }
+        let ww = weight[v];
+        if ww <= 0.0 {
+            continue;
+        }
+        w += ww;
+        e += ww * f64::from(shared.equity[hero * HAND_TYPES + v]);
+    }
+    if w > 0.0 {
+        e / w
+    } else {
+        0.5
+    }
+}
+
 fn live_hands(range: &[f64; HAND_TYPES], cap: usize, shared: &Shared) -> Vec<usize> {
-    let mut items: Vec<(usize, f64)> = (0..HAND_TYPES)
+    let mut items: Vec<(usize, f64, f64)> = (0..HAND_TYPES)
         .filter_map(|h| {
-            let w = shared.combos[h] * range[h].clamp(0.0, 1.0);
-            (w > 1e-4).then_some((h, w))
+            let freq = range[h].clamp(0.0, 1.0);
+            (freq > 1e-4).then_some((h, freq, shared.vs_random[h]))
         })
         .collect();
-    items.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    items.into_iter().take(cap).map(|(h, _)| h).collect()
+    items.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal))
+    });
+    items.into_iter().take(cap).map(|(h, _, _)| h).collect()
 }
 
 fn live_buckets(mass: &[f64; BUCKETS], cap: usize) -> Vec<usize> {
@@ -1343,13 +1373,20 @@ fn fill_three(
     }
 
     let fallback = mean_seat(icm);
+    let (first, rest) = three_first_rest(icm, seats);
+    let others = [[1usize, 2], [0, 2], [0, 1]];
     for slot in 0..3 {
         let seat = seats[slot];
+        let o1 = others[slot][0];
+        let o2 = others[slot][1];
         for h in 0..HAND_TYPES {
             out[seat][h] = if den[slot][h] > 0.0 {
                 num[slot][h] / den[slot][h]
             } else {
-                fallback[seat]
+                let e1 = equity_vs_live(h, &live[o1], &weight[o1], shared);
+                let e2 = equity_vs_live(h, &live[o2], &weight[o2], shared);
+                let p = (e1 * e2).clamp(0.0, 1.0);
+                p * first[seat] + (1.0 - p) * rest[seat]
             };
         }
     }
@@ -1361,6 +1398,40 @@ fn fill_three(
         };
         out[folder] = [ev; HAND_TYPES];
     }
+}
+
+fn three_first_rest(icm: &[[f64; PLAYERS]; 6], seats: [usize; 3]) -> ([f64; PLAYERS], [f64; PLAYERS]) {
+    let mut win = [0.0; PLAYERS];
+    let mut lose = [0.0; PLAYERS];
+    let mut n_win = [0.0; PLAYERS];
+    let mut n_lose = [0.0; PLAYERS];
+    for (perm, row) in icm.iter().enumerate() {
+        let winner = seats[PERM3[perm][0]];
+        for seat in 0..PLAYERS {
+            if seat == winner {
+                win[seat] += row[seat];
+                n_win[seat] += 1.0;
+            } else {
+                lose[seat] += row[seat];
+                n_lose[seat] += 1.0;
+            }
+        }
+    }
+    let mut first = [0.0; PLAYERS];
+    let mut rest = [0.0; PLAYERS];
+    for seat in 0..PLAYERS {
+        first[seat] = if n_win[seat] > 0.0 {
+            win[seat] / n_win[seat]
+        } else {
+            0.0
+        };
+        rest[seat] = if n_lose[seat] > 0.0 {
+            lose[seat] / n_lose[seat]
+        } else {
+            0.0
+        };
+    }
+    (first, rest)
 }
 
 fn fill_four(
@@ -1378,8 +1449,18 @@ fn fill_four(
             mass[slot][shared.bucket[h] as usize] +=
                 shared.combos[h] * ranges[slot][h].clamp(0.0, 1.0);
         }
+        let aa = shared.bucket[0] as usize;
+        if mass[slot][aa] <= LIVE {
+            mass[slot][aa] = 1e-6;
+        }
     }
-    let live: [Vec<usize>; 4] = std::array::from_fn(|slot| live_buckets(&mass[slot], FOUR_LIVE));
+    let mut live: [Vec<usize>; 4] = std::array::from_fn(|slot| live_buckets(&mass[slot], FOUR_LIVE));
+    let aa = shared.bucket[0] as usize;
+    for slot in 0..4 {
+        if !live[slot].contains(&aa) {
+            live[slot].push(aa);
+        }
+    }
 
     let mut num = [[0.0; BUCKETS]; 4];
     let mut den = [[0.0; BUCKETS]; 4];
@@ -1998,6 +2079,69 @@ mod tests {
         assert!(place_first_prob(0.85, 5) > 0.45);
         assert!(place_first_prob(0.32, 5) < 0.20);
         assert!(place_first_prob(0.85, 8) < place_first_prob(0.85, 5));
+    }
+
+    #[test]
+    fn live_hands_keeps_pairs_and_suited_when_range_is_mixed() {
+        let shared = shared_cards();
+        let range = [0.5; HAND_TYPES];
+        let live = live_hands(&range, 40, shared);
+        let aa = combo_index([Card::new(14, 0), Card::new(14, 1)]) as usize;
+        let kk = combo_index([Card::new(13, 0), Card::new(13, 1)]) as usize;
+        let aks = combo_index([Card::new(14, 0), Card::new(13, 0)]) as usize;
+        assert!(live.contains(&aa), "AA must stay in the 3-way sample");
+        assert!(live.contains(&kk), "KK must stay in the 3-way sample");
+        assert!(live.contains(&aks), "AKs must stay in the 3-way sample");
+    }
+
+    #[test]
+    fn three_way_ev_ranks_premiums_above_offsuit() {
+        let shared = shared_cards();
+        let range = [1.0; HAND_TYPES];
+        let mut icm = [[0.0; PLAYERS]; 6];
+        for perm in 0..6 {
+            icm[perm][PERM3[perm][0]] = 1.0;
+        }
+        let mut out = [[0.0; HAND_TYPES]; PLAYERS];
+        fill_three(
+            [&range, &range, &range],
+            [0, 1, 2],
+            &icm,
+            vec![3, 4, 5, 6, 7],
+            shared,
+            &mut out,
+        );
+        let aa = combo_index([Card::new(14, 0), Card::new(14, 1)]) as usize;
+        let kk = combo_index([Card::new(13, 0), Card::new(13, 1)]) as usize;
+        let aks = combo_index([Card::new(14, 0), Card::new(13, 0)]) as usize;
+        let ako = combo_index([Card::new(14, 0), Card::new(13, 1)]) as usize;
+        let q3o = combo_index([Card::new(12, 0), Card::new(3, 1)]) as usize;
+        assert!(
+            out[0][aa] > out[0][ako],
+            "AA {:.3} should beat AKo {:.3}",
+            out[0][aa],
+            out[0][ako]
+        );
+        assert!(
+            out[0][kk] > out[0][q3o] + 0.05,
+            "KK {:.3} should beat Q3o {:.3}",
+            out[0][kk],
+            out[0][q3o]
+        );
+        assert!(
+            out[0][aks] + 0.02 >= out[0][ako],
+            "AKs {:.3} should not be worse than AKo {:.3}",
+            out[0][aks],
+            out[0][ako]
+        );
+        let ato = combo_index([Card::new(14, 0), Card::new(10, 1)]) as usize;
+        let a9o = combo_index([Card::new(14, 0), Card::new(9, 1)]) as usize;
+        assert!(
+            out[0][ato] + 0.02 >= out[0][a9o],
+            "ATo {:.3} should not be worse than A9o {:.3}",
+            out[0][ato],
+            out[0][a9o]
+        );
     }
 
     #[test]
