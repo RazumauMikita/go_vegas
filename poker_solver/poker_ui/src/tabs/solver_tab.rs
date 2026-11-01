@@ -189,8 +189,6 @@ impl SolverTab {
         let mut close = None;
         let mut add = false;
         let mut import = false;
-        let mut start_calc = false;
-        let active_is_hand = matches!(self.tabs.get(self.active), Some(WorkspaceTab::Hand(_)));
 
         let control_h = 24.0;
         ui.allocate_ui_with_layout(
@@ -199,43 +197,6 @@ impl SolverTab {
             |ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(4.0, 0.0);
                 ui.set_height(control_h);
-                if active_is_hand {
-                    if ui
-                        .selectable_label(self.settings_open, "Настройки")
-                        .on_hover_text("Показать или скрыть панель настроек")
-                        .clicked()
-                    {
-                        self.settings_open = !self.settings_open;
-                    }
-
-                    let has_result = self.active_hand().is_some_and(|hand| hand.result.is_some());
-                    let computing = self.active_hand().is_some_and(|hand| hand.computing);
-                    let calc_label = self
-                        .active_hand()
-                        .map(SolverHand::calc_button_label)
-                        .unwrap_or("Рассчитать");
-                    if has_result {
-                        if ui
-                            .add_enabled(!computing, egui::Button::new(calc_label))
-                            .clicked()
-                        {
-                            start_calc = true;
-                        }
-                    }
-                    if computing {
-                        ui.spinner();
-                    }
-                    if let Some(error) = self.active_hand().and_then(|hand| hand.error.as_ref()) {
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(error).color(egui::Color32::RED).small(),
-                            )
-                            .truncate(),
-                        )
-                        .on_hover_text(error);
-                    }
-                    ui.separator();
-                }
                 let tabs_width = (ui.available_width() - 72.0).max(80.0);
 
                 egui::ScrollArea::horizontal()
@@ -300,12 +261,6 @@ impl SolverTab {
         if import {
             self.open_import_files();
         }
-        if start_calc {
-            if let Some(hand) = self.active_hand_mut() {
-                let ctx = ui.ctx().clone();
-                hand.start_calculation(&ctx);
-            }
-        }
     }
 
     pub fn open_hand(&mut self, request: OpenHandRequest, ctx: &Context) {
@@ -314,13 +269,6 @@ impl SolverTab {
         if let Some(hand) = self.active_hand_mut() {
             hand.apply_open_request(request);
             hand.start_calculation(ctx);
-        }
-    }
-
-    fn active_hand(&self) -> Option<&SolverHand> {
-        match self.tabs.get(self.active) {
-            Some(WorkspaceTab::Hand(hand)) => Some(hand),
-            _ => None,
         }
     }
 
@@ -460,6 +408,7 @@ impl SolverHand {
     }
 
     fn ui(&mut self, ctx: &Context, settings_open: &mut bool, settings_anim: &mut f32) {
+        self.draw_hand_toolbar(ctx, settings_open);
         let overlay_rect = ctx.available_rect();
 
         if self.result.is_some() && !self.tree.is_empty() {
@@ -539,6 +488,55 @@ impl SolverHand {
 
         self.draw_range_editor(ctx);
         self.draw_settings_drawer(ctx, overlay_rect, settings_open, settings_anim);
+    }
+
+    fn draw_hand_toolbar(&mut self, ctx: &Context, settings_open: &mut bool) {
+        let mut start_calc = false;
+        egui::TopBottomPanel::top("solver_hand_toolbar")
+            .resizable(false)
+            .frame(
+                egui::Frame::none()
+                    .fill(ctx.style().visuals.extreme_bg_color)
+                    .inner_margin(egui::Margin::symmetric(8.0, 6.0)),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.set_min_height(24.0);
+                    ui.spacing_mut().item_spacing = egui::vec2(4.0, 0.0);
+                    if ui
+                        .selectable_label(*settings_open, "Настройки")
+                        .on_hover_text("Показать или скрыть панель настроек")
+                        .clicked()
+                    {
+                        *settings_open = !*settings_open;
+                    }
+                    if self.result.is_some()
+                        && ui
+                            .add_enabled(
+                                !self.computing,
+                                egui::Button::new(self.calc_button_label()),
+                            )
+                            .clicked()
+                    {
+                        start_calc = true;
+                    }
+                    if self.computing {
+                        ui.spinner();
+                    }
+                    if let Some(error) = &self.error {
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(error).color(egui::Color32::RED).small(),
+                            )
+                            .truncate(),
+                        )
+                        .on_hover_text(error);
+                    }
+                });
+            });
+        if start_calc {
+            self.start_calculation(ctx);
+        }
     }
 
     fn draw_settings_drawer(

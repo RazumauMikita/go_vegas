@@ -199,6 +199,8 @@ impl ImportTab {
             )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
+                    ui.set_min_height(24.0);
+                    ui.spacing_mut().item_spacing = egui::vec2(4.0, 0.0);
                     if ui
                         .add_enabled(!self.analyzing, egui::Button::new("Загрузить файлы"))
                         .clicked()

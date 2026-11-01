@@ -218,15 +218,12 @@ pub fn parse_hand_history(text: &str) -> Result<ParsedHand, ParseError> {
             .unwrap_or(header.len());
         let line_tail = &header[match_end..line_end];
         let sitting_out = line_tail.contains("is sitting out");
-        if sitting_out {
-            continue;
-        }
         players.push(ParsedPlayer {
             seat,
             name,
             stack,
             position: Position::Unknown,
-            sitting_out: false,
+            sitting_out,
         });
     }
 
@@ -932,7 +929,7 @@ Total pot 150 | Rake 0
     }
 
     #[test]
-    fn sitting_out_players_are_skipped() {
+    fn sitting_out_players_stay_in_the_count() {
         let text = r"PokerStars Hand #1: Tournament #123, $1+$0.10 USD Hold'em No Limit - Level I (25/50)
 Table '1' 9-max Seat #1 is the button
 Seat 1: A (1000 in chips)
@@ -947,8 +944,54 @@ C: folds
 *** SUMMARY ***
 ";
         let hand = parse_imported_hand(text).expect("imported");
-        assert_eq!(hand.players.len(), 2);
-        assert!(hand.players.iter().all(|p| p.name != "B"));
+        assert_eq!(hand.players.len(), 3);
+        let sitting = hand.players.iter().find(|p| p.name == "B").expect("B");
+        assert!(sitting.sitting_out);
+        assert_eq!(sitting.position, Position::SB);
+    }
+
+    #[test]
+    fn seven_max_keeps_sitting_out_button_and_hero_hj() {
+        let text = r"PokerStars Hand #262498367331: Tournament #4042196996, $0.42+$0.08 USD Hold'em No Limit - Level V (75/150) - 2026/10/24 14:44:12 ET
+Table '4042196996 1' 9-max Seat #9 is the button
+Seat 1: Mattzy1021 (2135 in chips)
+Seat 2: Marcelino_RB (2240 in chips)
+Seat 4: zzombee (970 in chips)
+Seat 5: ediiiiii (3325 in chips)
+Seat 6: bbcbcv3 (2610 in chips)
+Seat 8: kakaluiz (1225 in chips) is sitting out
+Seat 9: 2Metros182 (995 in chips) is sitting out
+Mattzy1021: posts small blind 75
+Marcelino_RB: posts big blind 150
+*** HOLE CARDS ***
+Dealt to bbcbcv3 [Td Qc]
+kakaluiz has returned
+2Metros182 has returned
+zzombee: raises 820 to 970 and is all-in
+ediiiiii: folds
+bbcbcv3: folds
+kakaluiz: folds
+2Metros182: folds
+Mattzy1021: folds
+Marcelino_RB: folds
+*** SUMMARY ***
+Total pot 375 | Rake 0
+";
+        let hand = parse_imported_hand(text).expect("imported");
+        assert_eq!(hand.players.len(), 7);
+        assert_eq!(hand.hero_combo_label.as_deref(), Some("QTo"));
+        let hero = hand.hero_player().expect("hero");
+        assert_eq!(hero.position, Position::HJ);
+        assert!((hand.hero_stack_bb() - 17.40).abs() < 1e-9);
+        assert_eq!(solver_seat_label(hero.position, 7), Some("HJ"));
+        assert!(hand
+            .players
+            .iter()
+            .any(|p| p.name == "kakaluiz" && p.sitting_out && p.position == Position::CO));
+        assert!(hand
+            .players
+            .iter()
+            .any(|p| p.name == "2Metros182" && p.sitting_out && p.position == Position::BTN));
     }
 
     #[test]
