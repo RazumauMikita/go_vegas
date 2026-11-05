@@ -26,6 +26,7 @@ const ROW_SEL: Color32 = Color32::from_rgb(196, 226, 248);
 const ROW_HOVER: Color32 = Color32::from_rgb(232, 244, 252);
 const ROW_BG: Color32 = Color32::WHITE;
 const TEXT: Color32 = Color32::from_rgb(32, 32, 32);
+const TEXT_FAINT: Color32 = Color32::from_rgb(168, 168, 168);
 const GREEN: Color32 = Color32::from_rgb(46, 160, 67);
 const RED: Color32 = Color32::from_rgb(200, 60, 60);
 const GRID: Color32 = Color32::from_rgb(176, 192, 208);
@@ -2052,12 +2053,13 @@ fn draw_row(
                 );
             }
         } else {
+            let color = if *value == "F" { TEXT_FAINT } else { TEXT };
             ui.painter().text(
                 egui::pos2(x, rect.center().y),
                 egui::Align2::LEFT_CENTER,
                 *value,
                 font.clone(),
-                TEXT,
+                color,
             );
         }
         cursor += *col;

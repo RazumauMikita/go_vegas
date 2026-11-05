@@ -446,7 +446,7 @@ impl SolverAlgorithm for Cfr7Max {
                         hand,
                         ev,
                         strategy[hand],
-                        reach_of(node, hand, &opp),
+                        crate::algorithm::train_reach(reach_of(node, hand, &opp)),
                         t,
                     );
                 }

@@ -444,7 +444,7 @@ impl SolverAlgorithm for Cfr4Max {
             for hand in 0..HAND_TYPES {
                 let ev = action_ev(node, hand, &opp, &freq, &terminals, &self.model, &utg_fold);
                 let sigma = self.strategy_of(node, hand);
-                let reach = reach_of(node, hand, &opp);
+                let reach = crate::algorithm::train_reach(reach_of(node, hand, &opp));
                 dcfr(self.regret_mut(node), hand, ev, sigma, reach, t);
             }
         }

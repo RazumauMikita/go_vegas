@@ -18,6 +18,10 @@ pub(crate) fn apply_locked_strategies(
     }
 }
 
+pub(crate) fn train_reach(raw: f64) -> f64 {
+    raw.max(0.05)
+}
+
 pub(crate) fn overlay_locked_freqs(input: &SolverInput, freq: &mut [[f64; HAND_TYPES]]) {
     for (&id, range) in &input.locked_ranges {
         if let Some(slot) = freq.get_mut(id) {

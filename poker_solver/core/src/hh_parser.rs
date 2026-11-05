@@ -147,7 +147,7 @@ static RE_ANTE: LazyLock<Regex> =
 static RE_HAND_ID: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"PokerStars Hand #(\d+)").expect("valid regex"));
 static RE_DATETIME: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(\d{4})/(\d{2})/(\d{2})\s+(\d{2}):(\d{2}):(\d{2})").expect("valid regex")
+    Regex::new(r"(\d{4})/(\d{2})/(\d{2})\s+(\d{1,2}):(\d{2}):(\d{2})").expect("valid regex")
 });
 static RE_DEALT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"Dealt to (.+?) \[(\S+) (\S+)\]").expect("valid regex"));
@@ -454,7 +454,12 @@ pub fn parse_imported_hand(text: &str) -> Result<ImportedHand, ParseError> {
 
     let datetime = RE_DATETIME
         .captures(text)
-        .map(|c| format!("{}-{}-{} {}:{}:{}", &c[1], &c[2], &c[3], &c[4], &c[5], &c[6]))
+        .map(|c| {
+            format!(
+                "{}-{}-{} {:0>2}:{}:{}",
+                &c[1], &c[2], &c[3], &c[4], &c[5], &c[6]
+            )
+        })
         .unwrap_or_default();
 
     let (hero_name, hero_cards) = match RE_DEALT.captures(text) {
@@ -858,6 +863,23 @@ Total pot 3160 | Rake 0
         let hero = hand.hero_player().expect("hero");
         assert_eq!(hero.position, Position::UTG);
         assert!((hand.hero_stack_bb() - 75.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn parses_single_digit_hour() {
+        let text = r"PokerStars Hand #262565969498: Tournament #4043844846, $0.42+$0.08 USD Hold'em No Limit - Level I (10/20) - 2026/10/31 9:55:28 ET
+Table '4043844846 1' 9-max Seat #1 is the button
+Seat 1: FayfayR (1500 in chips)
+Seat 5: bbcbcv3 (1500 in chips)
+FayfayR: posts small blind 10
+bbcbcv3: posts big blind 20
+*** HOLE CARDS ***
+Dealt to bbcbcv3 [7c 2c]
+bbcbcv3: folds
+*** SUMMARY ***
+";
+        let hand = parse_imported_hand(text).expect("imported");
+        assert_eq!(hand.datetime, "2026-10-31 09:55:28");
     }
 
     #[test]
