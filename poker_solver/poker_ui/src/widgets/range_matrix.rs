@@ -5,7 +5,6 @@ const GRID_GAP: f32 = 1.0;
 const BAR_H: f32 = 20.0;
 const HEADER_H: f32 = 24.0;
 const IN_RANGE_EPS: f64 = 0.5;
-const IN_STRATEGY_EPS: f64 = 0.05;
 const FREQ_DISPLAY_EPS: f64 = 0.02;
 
 const HRC_GREEN: egui::Color32 = egui::Color32::from_rgb(110, 198, 82);
@@ -225,7 +224,12 @@ pub fn range_matrix_ui(
                 egui::FontId::proportional(value_font),
                 TEXT_DARK,
             );
-            if *mode == MatrixMode::Ev && freq >= IN_STRATEGY_EPS {
+            let outlined = match (*mode, hand_evs) {
+                (MatrixMode::Ev, Some(evs)) => evs[idx] >= -5e-3,
+                (MatrixMode::Ev, None) => freq >= IN_RANGE_EPS,
+                _ => false,
+            };
+            if outlined {
                 ui.painter().rect_stroke(
                     rect.shrink(0.5),
                     0.0,

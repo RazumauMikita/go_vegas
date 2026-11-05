@@ -1440,7 +1440,7 @@ fn analyze_imported_hand(
         &input.stacks,
         input.big_blind,
     );
-    let spot = find_hero_decision_path(&tree, &actions_before, hero_label)
+    let mut spot = find_hero_decision_path(&tree, &actions_before, hero_label)
         .and_then(|path| {
             let node = node_at_path(&tree, &path)?;
             Some(Spot {
@@ -1451,11 +1451,10 @@ fn analyze_imported_hand(
             })
         })
         .or_else(|| mask_spot(hand, &output))?;
-    let took_action = if spot.is_raise {
-        matches!(hero_action, HeroActionKind::Raise)
-    } else {
-        matches!(hero_action, HeroActionKind::Call | HeroActionKind::Raise)
-    };
+    if matches!(hero_action, HeroActionKind::Call) && facing_shove && spot.is_raise {
+        spot.title = spot.title.replacen("raises", "calls", 1);
+    }
+    let took_action = hero_took_spot_action(hero_action, spot.is_raise, facing_shove);
     let freq = spot.range[combo].clamp(0.0, 1.0);
     let diff = if let Some(evs) = spot.evs {
         if took_action {
@@ -1482,6 +1481,18 @@ fn analyze_imported_hand(
         title: spot.title,
         is_raise: spot.is_raise,
     })
+}
+
+fn hero_took_spot_action(
+    hero_action: HeroActionKind,
+    is_raise_spot: bool,
+    facing_shove: bool,
+) -> bool {
+    match hero_action {
+        HeroActionKind::Fold | HeroActionKind::Check => false,
+        HeroActionKind::Raise => true,
+        HeroActionKind::Call => !is_raise_spot || facing_shove,
+    }
 }
 
 struct Spot {
@@ -2299,7 +2310,7 @@ fn paint_mistake_mark(painter: &egui::Painter, rect: egui::Rect) {
 
 #[cfg(test)]
 mod spot_filter_tests {
-    use super::{datetime_minute, is_push_fold_spot, prior_shove_mask};
+    use super::{datetime_minute, hero_took_spot_action, is_push_fold_spot, prior_shove_mask};
     use poker_core::{parse_imported_hand, solver_position_index, HeroActionKind};
 
     const OPEN_THEN_SHOVE: &str = r"PokerStars Hand #262330970830: Tournament #4038016204, $0.42+$0.08 USD Hold'em No Limit - Level V (75/150) - 2026/10/07 20:59:08 ET
@@ -2725,6 +2736,30 @@ Total pot 400 | Rake 0
         assert_eq!(datetime_minute("2026-10-24 14:37:05"), "2026-10-24 14:37");
         assert_eq!(datetime_minute("2026-10-24 14:37"), "2026-10-24 14:37");
         assert!("2026-10-24 14:37:05" < "2026-10-24 14:37:40");
+    }
+
+    #[test]
+    fn call_vs_shove_counts_as_taking_raise_spot() {
+        assert!(hero_took_spot_action(
+            HeroActionKind::Call,
+            true,
+            true,
+        ));
+        assert!(!hero_took_spot_action(
+            HeroActionKind::Call,
+            true,
+            false,
+        ));
+        assert!(hero_took_spot_action(
+            HeroActionKind::Call,
+            false,
+            false,
+        ));
+        assert!(!hero_took_spot_action(
+            HeroActionKind::Fold,
+            true,
+            true,
+        ));
     }
 }
 
