@@ -36,6 +36,12 @@ pub enum QuizSourceKind {
     Saved,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuizTaskMode {
+    Hand,
+    Range,
+}
+
 #[derive(Debug, Clone)]
 pub struct QuizSettings {
     pub source: QuizSourceKind,
@@ -53,6 +59,7 @@ pub struct QuizSettings {
     pub prize_percents: Vec<String>,
     pub question_count: usize,
     pub include_facing_shove: bool,
+    pub task_mode: QuizTaskMode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +89,7 @@ impl Default for QuizSettings {
             prize_percents: default_prize_strings(3),
             question_count: 10,
             include_facing_shove: false,
+            task_mode: QuizTaskMode::Hand,
         }
     }
 }
@@ -189,7 +197,7 @@ pub fn generate_question(settings: &QuizSettings, rng: &mut Rng) -> Result<QuizC
     let hero_index = if facing {
         rng.gen_range(1, (n - 1) as u64) as usize
     } else {
-        rng.gen_range(0, (n - 1) as u64) as usize
+        rng.gen_range(0, n.saturating_sub(2) as u64) as usize
     };
     let hero_label = table_position_label(n, hero_index).to_string();
     let actions_before = prior_actions(n, hero_index, facing, rng);
@@ -282,6 +290,39 @@ pub fn solver_input_for(case: &QuizCase) -> Result<SolverInput, String> {
     })
 }
 
+pub fn grade_range(user: &[f64; 169], nash: &[f64; 169]) -> (QuizVerdict, f64) {
+    let mut abs = 0.0;
+    let mut total = 0.0;
+    for index in 0..169 {
+        let weight = combo_weight(index);
+        abs += (user[index].clamp(0.0, 1.0) - nash[index].clamp(0.0, 1.0)).abs() * weight;
+        total += weight;
+    }
+    let accuracy = if total <= 0.0 {
+        0.0
+    } else {
+        (1.0 - abs / total).clamp(0.0, 1.0)
+    };
+    let verdict = if accuracy >= 0.90 {
+        QuizVerdict::Correct
+    } else if accuracy >= 0.75 {
+        QuizVerdict::Mixed
+    } else {
+        QuizVerdict::Wrong
+    };
+    (verdict, accuracy)
+}
+
+fn combo_weight(index: usize) -> f64 {
+    if index < 13 {
+        6.0
+    } else if index < 91 {
+        4.0
+    } else {
+        12.0
+    }
+}
+
 pub fn grade_answer(freq: f64, ev: Option<f64>, took_action: bool) -> QuizVerdict {
     let nash_action = if let Some(ev) = ev {
         if ev.abs() < 0.10 {
@@ -302,7 +343,18 @@ pub fn grade_answer(freq: f64, ev: Option<f64>, took_action: bool) -> QuizVerdic
 }
 
 pub fn hero_seat_index(player_count: usize, hero_label: &str) -> Option<usize> {
-    (0..player_count).find(|&index| table_position_label(player_count, index) == hero_label)
+    (0..player_count)
+        .find(|&index| same_seat(table_position_label(player_count, index), hero_label))
+}
+
+fn same_seat(left: &str, right: &str) -> bool {
+    fn norm(name: &str) -> &str {
+        match name {
+            "BU" => "BTN",
+            other => other,
+        }
+    }
+    norm(left) == norm(right)
 }
 
 pub fn default_prize_strings(players: usize) -> Vec<String> {
@@ -427,6 +479,10 @@ fn parse_prize_payouts(prize_percents: &[String]) -> Result<Vec<f64>, String> {
         .into_iter()
         .map(|prize| prize.unwrap_or(0.0))
         .collect())
+}
+
+pub fn dealer_seat(players: usize) -> usize {
+    button_index_for(players)
 }
 
 fn button_index_for(players: usize) -> usize {
@@ -571,6 +627,28 @@ mod tests {
     }
 
     #[test]
+    fn unopened_hero_is_never_bb() {
+        let mut settings = QuizSettings::default();
+        settings.include_facing_shove = false;
+        settings.players_exact = false;
+        settings.players_min = 2;
+        settings.players_max = 6;
+        let mut rng = Rng::seed(99);
+        for _ in 0..80 {
+            let spot = generate_question(&settings, &mut rng).unwrap();
+            let hero = hero_seat_index(spot.player_count, &spot.hero_label).unwrap();
+            assert_ne!(hero, spot.player_count - 1);
+        }
+    }
+
+    #[test]
+    fn hero_seat_accepts_bu_alias() {
+        assert_eq!(hero_seat_index(3, "BU"), Some(0));
+        assert_eq!(hero_seat_index(4, "BU"), Some(1));
+        assert_eq!(hero_seat_index(2, "SB"), Some(0));
+    }
+
+    #[test]
     fn unopened_actions_are_folds() {
         let mut settings = QuizSettings::default();
         settings.include_facing_shove = false;
@@ -606,12 +684,34 @@ mod tests {
     }
 
     #[test]
+    fn grades_range_overlap() {
+        let nash = [1.0; 169];
+        let user = [1.0; 169];
+        let (verdict, accuracy) = grade_range(&user, &nash);
+        assert_eq!(verdict, QuizVerdict::Correct);
+        assert!(accuracy > 0.99);
+
+        let empty = [0.0; 169];
+        let (verdict, accuracy) = grade_range(&empty, &nash);
+        assert_eq!(verdict, QuizVerdict::Wrong);
+        assert!(accuracy < 0.05);
+    }
+
+    #[test]
     fn grades_mixed_and_clear_spots() {
         assert_eq!(grade_answer(0.9, Some(1.4), true), QuizVerdict::Correct);
         assert_eq!(grade_answer(0.9, Some(1.4), false), QuizVerdict::Wrong);
         assert_eq!(grade_answer(0.4, Some(-0.8), false), QuizVerdict::Correct);
         assert_eq!(grade_answer(0.5, Some(0.02), true), QuizVerdict::Mixed);
         assert_eq!(grade_answer(0.4, None, true), QuizVerdict::Mixed);
+    }
+
+    #[test]
+    fn dealer_seat_matches_solver_order() {
+        assert_eq!(dealer_seat(2), 0);
+        assert_eq!(dealer_seat(3), 0);
+        assert_eq!(dealer_seat(6), 3);
+        assert_eq!(dealer_seat(9), 6);
     }
 
     #[test]

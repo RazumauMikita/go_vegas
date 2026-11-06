@@ -270,6 +270,16 @@ pub fn node_at_path_mut<'a>(tree: &'a mut [TreeNode], path: &[usize]) -> Option<
     Some(current)
 }
 
+pub fn same_player(a: &str, b: &str) -> bool {
+    fn norm(name: &str) -> &str {
+        match name {
+            "BU" => "BTN",
+            other => other,
+        }
+    }
+    norm(a) == norm(b)
+}
+
 pub fn find_hero_decision_path(
     tree: &[TreeNode],
     actions_before: &[(String, bool)],
@@ -290,14 +300,19 @@ fn walk_spot(
     }
     if remaining.is_empty() {
         let view = &siblings[skip..];
-        let j = view.iter().position(|node| node.player() == hero)?;
+        let j = view
+            .iter()
+            .position(|node| same_player(node.player(), hero))?;
         let mut next = path;
         next.push(skip + j);
         return Some(next);
     }
     let (pos, is_fold) = &remaining[0];
     let view = &siblings[skip..];
-    let Some(j) = view.iter().position(|node| node.player() == pos.as_str()) else {
+    let Some(j) = view
+        .iter()
+        .position(|node| same_player(node.player(), pos.as_str()))
+    else {
         return walk_spot(siblings, path, skip, &remaining[1..], hero);
     };
     let abs = skip + j;
@@ -317,17 +332,23 @@ fn walk_spot(
 }
 
 fn node_depends_on_player(node: &TreeNode, player: &str) -> bool {
-    if node.player() == player {
+    if same_player(node.player(), player) {
         return true;
     }
-    let vs = node
-        .label
-        .strip_prefix(node.player())
-        .unwrap_or("")
-        .trim()
-        .strip_prefix("vs ")
-        .unwrap_or("");
-    vs.split(", ").any(|name| name == player)
+    involved_players(&node.label).any(|name| same_player(name, player))
+}
+
+fn involved_players(label: &str) -> impl Iterator<Item = &str> {
+    let vs = if let Some(rest) = label.split_once(" vs ").map(|(_, rest)| rest) {
+        rest
+    } else if let Some(start) = label.find("(vs ") {
+        label[start + 4..].trim_end_matches(')')
+    } else {
+        ""
+    };
+    vs.split([',', '+', '&'])
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
 }
 
 pub fn draw_strategy_tree_header(ui: &mut Ui) {
@@ -1177,6 +1198,19 @@ mod tests {
         let tree = build_3max_tree(&empty_3max_ranges(), None);
         let path = find_hero_decision_path(&tree, &[("BTN".to_string(), true)], "SB");
         assert_eq!(path, Some(vec![1]));
+    }
+
+    #[test]
+    fn finds_hero_spot_with_bu_alias() {
+        let tree = build_3max_tree(&empty_3max_ranges(), None);
+        let path = find_hero_decision_path(&tree, &[], "BU");
+        assert_eq!(path, Some(vec![0]));
+        let facing = find_hero_decision_path(
+            &tree,
+            &[("BU".to_string(), false), ("SB".to_string(), true)],
+            "BB",
+        );
+        assert_eq!(facing, Some(vec![0, 1]));
     }
 
     #[test]
