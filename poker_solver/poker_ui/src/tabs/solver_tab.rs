@@ -12,8 +12,8 @@ use poker_core::{
 use crate::tabs::import_tab::ImportTab;
 use crate::tabs::strategy_tree::{
     build_strategy_tree, display_player, display_vs, draw_strategy_tree, draw_strategy_tree_header,
-    expand_path, find_hero_decision_path, format_amount_bb, node_at_path, node_at_path_mut, NodePath,
-    TreeNode,
+    expand_path, find_hero_decision_path, format_amount_bb, node_at_path, node_at_path_mut,
+    NodePath, TreeNode,
 };
 use crate::util::format_duration;
 use crate::widgets::{
@@ -204,7 +204,9 @@ impl SolverTab {
                     .max_width(tabs_width)
                     .max_height(control_h)
                     .auto_shrink([true, false])
-                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
+                    .scroll_bar_visibility(
+                        egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded,
+                    )
                     .show(ui, |ui| {
                         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                             ui.set_height(control_h);
@@ -292,7 +294,8 @@ impl SolverTab {
             .unwrap_or_else(|| {
                 EquityCache::from_bytes(CACHE_BYTES).expect("embedded cache corrupted")
             });
-        self.tabs.push(WorkspaceTab::Hand(SolverHand::with_cache(id, cache)));
+        self.tabs
+            .push(WorkspaceTab::Hand(SolverHand::with_cache(id, cache)));
         self.active = self.tabs.len() - 1;
     }
 
@@ -479,7 +482,8 @@ impl SolverHand {
                     ui.vertical_centered(|ui| {
                         ui.add_space(40.0);
                         ui.label("Введите параметры и нажмите «Рассчитать».");
-                        if !*settings_open && ui.button("Открыть настройки").clicked() {
+                        if !*settings_open && ui.button("Открыть настройки").clicked()
+                        {
                             *settings_open = true;
                         }
                     });
@@ -574,7 +578,10 @@ impl SolverHand {
         );
         let dim_alpha = (*settings_anim * 120.0).round() as u8;
         let dim_rect = egui::Rect::from_min_max(
-            egui::pos2(panel_rect.right().max(overlay_rect.left()), overlay_rect.top()),
+            egui::pos2(
+                panel_rect.right().max(overlay_rect.left()),
+                overlay_rect.top(),
+            ),
             overlay_rect.max,
         );
 
@@ -588,11 +595,8 @@ impl SolverHand {
                 .show(ctx, |ui| {
                     let (rect, response) =
                         ui.allocate_exact_size(dim_rect.size(), egui::Sense::click());
-                    ui.painter().rect_filled(
-                        rect,
-                        0.0,
-                        egui::Color32::from_black_alpha(dim_alpha),
-                    );
+                    ui.painter()
+                        .rect_filled(rect, 0.0, egui::Color32::from_black_alpha(dim_alpha));
                     response
                 })
                 .inner;
@@ -862,7 +866,8 @@ impl SolverHand {
                 for index in 0..self.prize_percents.len() {
                     ui.label(format!("{}", index + 1));
                     ui.add(
-                        egui::TextEdit::singleline(&mut self.prize_percents[index]).hint_text("нет"),
+                        egui::TextEdit::singleline(&mut self.prize_percents[index])
+                            .hint_text("нет"),
                     );
                     ui.end_row();
                 }
@@ -1207,10 +1212,12 @@ impl SolverHand {
                     );
                     if slider.dragged() || slider.drag_started() {
                         editor.slider_pct = pct.clamp(0.0, 100.0);
-                        editor.range = fill_range_to_share(&editor.ranking, editor.slider_pct / 100.0);
+                        editor.range =
+                            fill_range_to_share(&editor.ranking, editor.slider_pct / 100.0);
                     } else if drag.changed() && (drag.has_focus() || drag.dragged()) {
                         editor.slider_pct = typed.clamp(0.0, 100.0);
-                        editor.range = fill_range_to_share(&editor.ranking, editor.slider_pct / 100.0);
+                        editor.range =
+                            fill_range_to_share(&editor.ranking, editor.slider_pct / 100.0);
                     }
                 });
 
@@ -1531,7 +1538,10 @@ fn draw_import_icon(ui: &mut Ui, color: egui::Color32) {
     for i in 0..3 {
         let y = page.top() + 4.0 + i as f32 * 3.2;
         painter.line_segment(
-            [egui::pos2(page.left() + 2.5, y), egui::pos2(page.right() - 2.5, y)],
+            [
+                egui::pos2(page.left() + 2.5, y),
+                egui::pos2(page.right() - 2.5, y),
+            ],
             stroke,
         );
     }
@@ -1871,5 +1881,4 @@ mod tests {
         assert_eq!(tab.active, 0);
         assert_eq!(tab.tabs[0].tab_title(), remaining_title);
     }
-
 }

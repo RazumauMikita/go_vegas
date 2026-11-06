@@ -12,6 +12,7 @@ use poker_core::{
     HeroActionKind, ImportedHand, SolverInput, SolverOutput,
 };
 
+use crate::quiz::{new_id, QuizCase, QuizLibrary, DEFAULT_CATEGORY};
 use crate::tabs::solver_tab::OpenHandRequest;
 use crate::tabs::strategy_tree::{
     build_strategy_tree, display_player, display_vs, find_hero_decision_path, format_amount_bb,
@@ -43,6 +44,7 @@ pub struct ImportTab {
     status: String,
     error: Option<String>,
     analyze_modal: Option<AnalyzeModal>,
+    save_quiz_modal: Option<SaveQuizModal>,
     worker_rx: Option<mpsc::Receiver<AnalyzeMessage>>,
     analyzing: bool,
     analyze_progress: (usize, usize),
@@ -102,6 +104,14 @@ struct AnalyzeSettings {
     max_bb: f64,
     fold_allin_blinds: bool,
     multithread: bool,
+}
+
+struct SaveQuizModal {
+    tournament_index: usize,
+    hand_index: usize,
+    category: String,
+    categories: Vec<String>,
+    new_category: String,
 }
 
 struct AnalyzeModal {
@@ -168,6 +178,7 @@ impl ImportTab {
             status: String::new(),
             error: None,
             analyze_modal: None,
+            save_quiz_modal: None,
             worker_rx: None,
             analyzing: false,
             analyze_progress: (0, 0),
@@ -190,6 +201,7 @@ impl ImportTab {
     pub fn ui(&mut self, ctx: &Context) {
         self.handle_shortcuts(ctx);
         self.draw_analyze_modal(ctx);
+        self.draw_save_quiz_modal(ctx);
 
         egui::TopBottomPanel::top("import_toolbar")
             .resizable(false)
@@ -372,10 +384,7 @@ impl ImportTab {
             let text = match std::fs::read_to_string(&path) {
                 Ok(text) => text,
                 Err(err) => {
-                    self.error = Some(format!(
-                        "не удалось прочитать {}: {err}",
-                        path.display()
-                    ));
+                    self.error = Some(format!("не удалось прочитать {}: {err}", path.display()));
                     continue;
                 }
             };
@@ -385,21 +394,18 @@ impl ImportTab {
                 }
             }
         }
-        self.tournaments.sort_by(|a, b| b.start.cmp(&a.start).then(b.id.cmp(&a.id)));
+        self.tournaments
+            .sort_by(|a, b| b.start.cmp(&a.start).then(b.id.cmp(&a.id)));
         for tournament in &mut self.tournaments {
-            tournament
-                .hands
-                .sort_by(|a, b| {
-                    a.hand
-                        .datetime
-                        .cmp(&b.hand.datetime)
-                        .then(a.hand.hand_id.cmp(&b.hand.hand_id))
-                });
+            tournament.hands.sort_by(|a, b| {
+                a.hand
+                    .datetime
+                    .cmp(&b.hand.datetime)
+                    .then(a.hand.hand_id.cmp(&b.hand.hand_id))
+            });
         }
         let added_tournaments = self.tournaments.len();
-        self.status = format!(
-            "загружено {added_hands} рук, {added_tournaments} турниров"
-        );
+        self.status = format!("загружено {added_hands} рук, {added_tournaments} турниров");
         if !self.tournaments.is_empty() && self.selected_tournament >= self.tournaments.len() {
             self.selected_tournament = 0;
             self.selected_hand = 0;
@@ -429,10 +435,15 @@ impl ImportTab {
             return true;
         };
 
-        if existing.hands.iter().any(|row| row.hand.hand_id == hand.hand_id) {
+        if existing
+            .hands
+            .iter()
+            .any(|row| row.hand.hand_id == hand.hand_id)
+        {
             return false;
         }
-        if existing.start.is_empty() || (!hand.datetime.is_empty() && hand.datetime < existing.start)
+        if existing.start.is_empty()
+            || (!hand.datetime.is_empty() && hand.datetime < existing.start)
         {
             existing.start = hand.datetime.clone();
         }
@@ -535,6 +546,7 @@ impl ImportTab {
         let mut select = None;
         let mut open = false;
         let mut analyze_one = None;
+        let mut save_quiz = None;
         let selected = self.selected_hand;
         let analyzing = self.analyzing;
         egui::ScrollArea::vertical()
@@ -596,6 +608,11 @@ impl ImportTab {
                             analyze_one = Some(index);
                             ui.close_menu();
                         }
+                        if ui.button("Сохранить в квиз").clicked() {
+                            select = Some(index);
+                            save_quiz = Some(index);
+                            ui.close_menu();
+                        }
                     });
                 }
             });
@@ -608,6 +625,10 @@ impl ImportTab {
         if let Some(index) = analyze_one {
             self.selected_hand = index;
             self.open_analyze_modal(self.selected_tournament, Some(index));
+        }
+        if let Some(index) = save_quiz {
+            self.selected_hand = index;
+            self.open_save_quiz_modal(index);
         }
     }
 
@@ -663,9 +684,10 @@ impl ImportTab {
         let mut rows: Vec<(usize, &str, String, String, &str)> = (0..n)
             .filter_map(|index| {
                 let label = table_position_label(n, index);
-                let player = hand.players.iter().find(|p| {
-                    solver_seat_label(p.position, n) == Some(label)
-                })?;
+                let player = hand
+                    .players
+                    .iter()
+                    .find(|p| solver_seat_label(p.position, n) == Some(label))?;
                 let action = hand
                     .player_action(&player.name)
                     .map(|a| a.code())
@@ -832,12 +854,7 @@ impl ImportTab {
             match modal.to_settings() {
                 Ok(settings) => {
                     self.last_settings = Some(settings.clone());
-                    self.start_analyze(
-                        modal.tournament_index,
-                        modal.hand_index,
-                        settings,
-                        ctx,
-                    );
+                    self.start_analyze(modal.tournament_index, modal.hand_index, settings, ctx);
                 }
                 Err(err) => self.error = Some(err),
             }
@@ -955,6 +972,176 @@ impl ImportTab {
             actions_before,
             hero_label: hero_label.to_string(),
         });
+    }
+
+    fn open_save_quiz_modal(&mut self, hand_index: usize) {
+        let library = QuizLibrary::load();
+        let mut categories = library.categories();
+        if !categories
+            .iter()
+            .any(|category| category == DEFAULT_CATEGORY)
+        {
+            categories.insert(0, DEFAULT_CATEGORY.to_string());
+        }
+        self.save_quiz_modal = Some(SaveQuizModal {
+            tournament_index: self.selected_tournament,
+            hand_index,
+            category: if categories
+                .iter()
+                .any(|category| category == DEFAULT_CATEGORY)
+            {
+                DEFAULT_CATEGORY.to_string()
+            } else {
+                categories
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| DEFAULT_CATEGORY.to_string())
+            },
+            categories,
+            new_category: String::new(),
+        });
+        self.error = None;
+    }
+
+    fn draw_save_quiz_modal(&mut self, ctx: &Context) {
+        let Some(mut modal) = self.save_quiz_modal.take() else {
+            return;
+        };
+        let screen = ctx.screen_rect();
+        egui::Area::new(egui::Id::new("quiz_save_dim"))
+            .order(egui::Order::Middle)
+            .fixed_pos(screen.min)
+            .interactable(true)
+            .show(ctx, |ui| {
+                let (rect, _) = ui.allocate_exact_size(screen.size(), Sense::click());
+                ui.painter()
+                    .rect_filled(rect, 0.0, Color32::from_black_alpha(90));
+            });
+
+        let mut open = true;
+        let mut confirmed = false;
+        let mut cancelled = false;
+        egui::Window::new("Сохранить в квиз")
+            .id(egui::Id::new("quiz_save_window"))
+            .order(egui::Order::Foreground)
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .default_size(egui::vec2(360.0, 180.0))
+            .show(ctx, |ui| {
+                ui.set_min_width(320.0);
+                ui.label("Категория:");
+                egui::ComboBox::from_id_salt("save_quiz_category")
+                    .selected_text(&modal.category)
+                    .show_ui(ui, |ui| {
+                        for category in &modal.categories {
+                            ui.selectable_value(&mut modal.category, category.clone(), category);
+                        }
+                    });
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut modal.new_category)
+                            .hint_text("Новая категория")
+                            .desired_width(200.0),
+                    );
+                    if ui.button("Добавить").clicked() {
+                        let name = modal.new_category.trim().to_string();
+                        if !name.is_empty() {
+                            if !modal.categories.iter().any(|category| category == &name) {
+                                modal.categories.push(name.clone());
+                            }
+                            modal.category = name;
+                            modal.new_category.clear();
+                        }
+                    }
+                });
+                ui.add_space(10.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Отмена").clicked() {
+                        cancelled = true;
+                    }
+                    if ui.button("Сохранить").clicked() {
+                        confirmed = true;
+                    }
+                });
+            });
+
+        if confirmed {
+            self.save_hand_to_quiz(modal.tournament_index, modal.hand_index, modal.category);
+        } else if open && !cancelled {
+            self.save_quiz_modal = Some(modal);
+        }
+    }
+
+    fn save_hand_to_quiz(&mut self, tournament_index: usize, hand_index: usize, category: String) {
+        let Some(tournament) = self.tournaments.get(tournament_index) else {
+            return;
+        };
+        let Some(row) = tournament.hands.get(hand_index) else {
+            return;
+        };
+        let hand = &row.hand;
+        let Some(stacks) = hand.solver_stacks() else {
+            self.error = Some("не удалось собрать стеки для квиза".into());
+            return;
+        };
+        let n = stacks.len();
+        let Some(hero) = hand.hero_player() else {
+            self.error = Some("герой не найден в руке".into());
+            return;
+        };
+        let Some(hero_label) = solver_seat_label(hero.position, n) else {
+            self.error = Some("неизвестная позиция героя".into());
+            return;
+        };
+        let Some(combo) = hand.hero_combo else {
+            self.error = Some("у героя нет карт".into());
+            return;
+        };
+        let category = {
+            let name = category.trim();
+            if name.is_empty() {
+                DEFAULT_CATEGORY.to_string()
+            } else {
+                name.to_string()
+            }
+        };
+        let prizes = self
+            .last_settings
+            .as_ref()
+            .map(|s| prize_percent_strings(&s.prizes, n))
+            .unwrap_or_else(|| default_prize_strings(n));
+        let case = QuizCase {
+            id: new_id(),
+            category: category.clone(),
+            source: format!("{} / {}", tournament.id, hand.hand_id),
+            player_count: n,
+            stacks,
+            prize_percents: prizes,
+            small_blind: hand.small_blind,
+            big_blind: hand.big_blind,
+            ante: hand.ante,
+            actions_before: actions_before_hero(hand),
+            hero_label: hero_label.to_string(),
+            hero_combo: combo,
+            hero_combo_label: hand
+                .hero_combo_label
+                .clone()
+                .unwrap_or_else(|| poker_core::combo_label(combo)),
+            hero_cards: hand
+                .hero_cards
+                .map(|cards| [cards[0].to_string(), cards[1].to_string()]),
+        };
+        let mut library = QuizLibrary::load();
+        library.add(case);
+        match library.save() {
+            Ok(()) => {
+                self.status = format!("Раздача сохранена в квиз: {category}");
+                self.error = None;
+            }
+            Err(err) => self.error = Some(err),
+        }
     }
 }
 
@@ -1156,7 +1343,8 @@ impl AnalyzeModal {
                         dollar_changed = true;
                     }
                     draw_table_grid(ui, rect, &cols, grid);
-                    ui.painter().rect_stroke(rect, 0.0, Stroke::new(1.0_f32, grid));
+                    ui.painter()
+                        .rect_stroke(rect, 0.0, Stroke::new(1.0_f32, grid));
                 }
             });
         if pct_changed || dollar_changed {
@@ -1434,12 +1622,7 @@ fn analyze_imported_hand(
     };
 
     let actions_before = actions_before_hero(hand);
-    let tree = build_strategy_tree(
-        &output,
-        input.button_index,
-        &input.stacks,
-        input.big_blind,
-    );
+    let tree = build_strategy_tree(&output, input.button_index, &input.stacks, input.big_blind);
     let mut spot = find_hero_decision_path(&tree, &actions_before, hero_label)
         .and_then(|path| {
             let node = node_at_path(&tree, &path)?;
@@ -1538,10 +1721,10 @@ fn mask_spot(hand: &ImportedHand, output: &SolverOutput) -> Option<Spot> {
     let current_bet = shovers
         .iter()
         .filter_map(|label| {
-            hand.players.iter().find(|player| {
-                solver_seat_label(player.position, n) == Some(label.as_str())
-            })
-            .map(|player| player.stack)
+            hand.players
+                .iter()
+                .find(|player| solver_seat_label(player.position, n) == Some(label.as_str()))
+                .map(|player| player.stack)
         })
         .fold(0.0_f64, f64::max);
     let someone_behind = hero_seat + 1 < n;
@@ -1603,7 +1786,11 @@ fn node_index(players: usize, actor: usize, mask: u32) -> Option<usize> {
     })
 }
 
-fn ranges_at(output: &SolverOutput, players: usize, node: usize) -> Option<([f64; 169], [f64; 169])> {
+fn ranges_at(
+    output: &SolverOutput,
+    players: usize,
+    node: usize,
+) -> Option<([f64; 169], [f64; 169])> {
     let (freq, ev) = match players {
         5 => output.five_max.as_ref().map(|r| (&r.freq, &r.ev)),
         6 => output.six_max.as_ref().map(|r| (&r.freq, &r.ev)),
@@ -1751,7 +1938,11 @@ fn solver_input(hand: &ImportedHand, settings: &AnalyzeSettings) -> Option<Solve
 fn input_key(input: &SolverInput) -> InputKey {
     (
         input.num_players,
-        input.stacks.iter().map(|s| (s * 10.0).round() as i64).collect(),
+        input
+            .stacks
+            .iter()
+            .map(|s| (s * 10.0).round() as i64)
+            .collect(),
         (input.small_blind * 10.0).round() as i64,
         (input.big_blind * 10.0).round() as i64,
         (input.ante * 10.0).round() as i64,
@@ -1908,7 +2099,13 @@ fn hand_order(tournament: &ImportedTournament, sort: Option<(usize, bool)>) -> V
                 .hero_action
                 .map(|action| action.code())
                 .unwrap_or("")
-                .cmp(right.hand.hero_action.map(|action| action.code()).unwrap_or("")),
+                .cmp(
+                    right
+                        .hand
+                        .hero_action
+                        .map(|action| action.code())
+                        .unwrap_or(""),
+                ),
             4 => pos_rank(&left.hand).cmp(&pos_rank(&right.hand)),
             5 => cmp_f64(left.hand.hero_stack_bb(), right.hand.hero_stack_bb()),
             6 => cmp_f64(left.hand.effective_bb(), right.hand.effective_bb()),
@@ -1931,10 +2128,7 @@ fn pos_rank(hand: &ImportedHand) -> u8 {
         .unwrap_or(99)
 }
 
-fn solver_position_index_for_sort(
-    position: poker_core::Position,
-    players: usize,
-) -> Option<u8> {
+fn solver_position_index_for_sort(position: poker_core::Position, players: usize) -> Option<u8> {
     poker_core::solver_position_index(position, players).map(|index| index as u8)
 }
 
@@ -1992,8 +2186,13 @@ fn draw_header(
     let mut clicked = None;
     let mut x = rect.left();
     for (index, (label, col)) in labels.iter().zip(widths.iter()).enumerate() {
-        let col_rect = egui::Rect::from_min_size(egui::pos2(x, rect.top()), egui::vec2(*col, ROW_H));
-        let response = ui.interact(col_rect, ui.id().with("import_hdr").with(index), Sense::click());
+        let col_rect =
+            egui::Rect::from_min_size(egui::pos2(x, rect.top()), egui::vec2(*col, ROW_H));
+        let response = ui.interact(
+            col_rect,
+            ui.id().with("import_hdr").with(index),
+            Sense::click(),
+        );
         if response.clicked() {
             clicked = Some(index);
         }
@@ -2177,10 +2376,7 @@ fn paint_folder_icon(painter: &egui::Painter, rect: egui::Rect) {
     let stroke = Stroke::new(1.2_f32, color);
     let tab = rect.height() * 0.28;
     painter.rect_stroke(
-        egui::Rect::from_min_max(
-            egui::pos2(rect.left(), rect.top() + tab),
-            rect.max,
-        ),
+        egui::Rect::from_min_max(egui::pos2(rect.left(), rect.top() + tab), rect.max),
         1.0,
         stroke,
     );
@@ -2740,26 +2936,10 @@ Total pot 400 | Rake 0
 
     #[test]
     fn call_vs_shove_counts_as_taking_raise_spot() {
-        assert!(hero_took_spot_action(
-            HeroActionKind::Call,
-            true,
-            true,
-        ));
-        assert!(!hero_took_spot_action(
-            HeroActionKind::Call,
-            true,
-            false,
-        ));
-        assert!(hero_took_spot_action(
-            HeroActionKind::Call,
-            false,
-            false,
-        ));
-        assert!(!hero_took_spot_action(
-            HeroActionKind::Fold,
-            true,
-            true,
-        ));
+        assert!(hero_took_spot_action(HeroActionKind::Call, true, true,));
+        assert!(!hero_took_spot_action(HeroActionKind::Call, true, false,));
+        assert!(hero_took_spot_action(HeroActionKind::Call, false, false,));
+        assert!(!hero_took_spot_action(HeroActionKind::Fold, true, true,));
     }
 }
 
@@ -2769,8 +2949,10 @@ fn draw_table_grid(ui: &Ui, rect: egui::Rect, cols: &[f32], color: Color32) {
     for (index, width) in cols.iter().enumerate() {
         x += *width;
         if index + 1 < cols.len() {
-            ui.painter()
-                .line_segment([egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())], stroke);
+            ui.painter().line_segment(
+                [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+                stroke,
+            );
         }
     }
 }

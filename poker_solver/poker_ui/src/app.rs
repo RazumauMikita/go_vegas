@@ -1,7 +1,7 @@
 use egui::{Context, Ui, ViewportCommand};
 use poker_core::ThreeWayRankCache;
 
-use crate::tabs::{EquityTab, EvalTab, IcmTab, SolverTab};
+use crate::tabs::{EquityTab, EvalTab, IcmTab, QuizTab, SolverTab};
 
 const THREE_WAY_RANK_CACHE_BYTES: &[u8] = include_bytes!("../assets/three_way_rank_cache.bin");
 const PREFERRED_INNER_SIZE: egui::Vec2 = egui::vec2(1400.0, 900.0);
@@ -9,6 +9,7 @@ const PREFERRED_INNER_SIZE: egui::Vec2 = egui::vec2(1400.0, 900.0);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Solver,
+    Quiz,
     Equity,
     Icm,
     Eval,
@@ -17,6 +18,7 @@ pub enum Tab {
 pub struct PokerApp {
     active_tab: Tab,
     solver: SolverTab,
+    quiz: QuizTab,
     equity: EquityTab,
     icm: IcmTab,
     eval: EvalTab,
@@ -29,6 +31,7 @@ impl Default for PokerApp {
         Self {
             active_tab: Tab::Solver,
             solver: SolverTab::default(),
+            quiz: QuizTab::default(),
             equity: EquityTab::default(),
             icm: IcmTab::default(),
             eval: EvalTab::default(),
@@ -44,6 +47,7 @@ impl eframe::App for PokerApp {
         }
 
         self.solver.poll(ctx);
+        self.quiz.poll(ctx);
 
         egui::TopBottomPanel::top("app_header").show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
@@ -55,6 +59,7 @@ impl eframe::App for PokerApp {
 
         match self.active_tab {
             Tab::Solver => self.solver.ui(ctx),
+            Tab::Quiz => self.quiz.ui(ctx),
             Tab::Equity => {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     egui::ScrollArea::vertical()
@@ -84,6 +89,7 @@ impl PokerApp {
     fn draw_tabs(&mut self, ui: &mut Ui) {
         ui.horizontal_wrapped(|ui| {
             tab_button(ui, &mut self.active_tab, Tab::Solver, "Solver");
+            tab_button(ui, &mut self.active_tab, Tab::Quiz, "Quiz");
             tab_button(ui, &mut self.active_tab, Tab::Equity, "Equity");
             tab_button(ui, &mut self.active_tab, Tab::Icm, "ICM");
             tab_button(ui, &mut self.active_tab, Tab::Eval, "Eval");
@@ -100,7 +106,11 @@ fn tab_button(ui: &mut Ui, active: &mut Tab, tab: Tab, label: &str) {
 fn fit_native_window(ctx: &Context) -> bool {
     let (monitor, inner, outer) = ctx.input(|i| {
         let viewport = i.viewport();
-        (viewport.monitor_size, viewport.inner_rect, viewport.outer_rect)
+        (
+            viewport.monitor_size,
+            viewport.inner_rect,
+            viewport.outer_rect,
+        )
     });
     let Some(monitor) = monitor else {
         return false;
@@ -164,6 +174,8 @@ mod tests {
     #[test]
     fn tab_switching() {
         let mut app = PokerApp::default();
+        app.active_tab = Tab::Quiz;
+        assert_eq!(app.active_tab, Tab::Quiz);
         app.active_tab = Tab::Equity;
         assert_eq!(app.active_tab, Tab::Equity);
         app.active_tab = Tab::Icm;

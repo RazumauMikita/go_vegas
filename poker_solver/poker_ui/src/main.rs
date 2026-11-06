@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 mod app;
+mod quiz;
 mod tabs;
 mod util;
 mod widgets;

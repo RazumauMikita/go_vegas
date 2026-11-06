@@ -35,10 +35,7 @@ pub enum Action {
 
 impl Action {
     pub fn is_raise(self) -> bool {
-        matches!(
-            self,
-            Self::Raise | Self::ThreeBet | Self::FourBet
-        )
+        matches!(self, Self::Raise | Self::ThreeBet | Self::FourBet)
     }
 
     pub fn is_call(self) -> bool {
@@ -306,9 +303,7 @@ fn walk_spot(
     let abs = skip + j;
     if *is_fold {
         let mut next_skip = abs + 1;
-        while next_skip < siblings.len()
-            && node_depends_on_player(&siblings[next_skip], pos)
-        {
+        while next_skip < siblings.len() && node_depends_on_player(&siblings[next_skip], pos) {
             next_skip += 1;
         }
         walk_spot(siblings, path, next_skip, &remaining[1..], hero)
@@ -467,11 +462,8 @@ pub fn draw_strategy_tree(
         } else {
             DOT_RAISE
         };
-        let child_call_line = in_call_line
-            || matches!(
-                node.action,
-                Action::ThreeBet | Action::FourBet
-            );
+        let child_call_line =
+            in_call_line || matches!(node.action, Action::ThreeBet | Action::FourBet);
         ui.painter().with_clip_rect(action_rect).circle_filled(
             Pos2::new(dot_x, rect.center().y),
             4.5,
@@ -1183,11 +1175,7 @@ mod tests {
     #[test]
     fn finds_hero_spot_after_btn_fold() {
         let tree = build_3max_tree(&empty_3max_ranges(), None);
-        let path = find_hero_decision_path(
-            &tree,
-            &[("BTN".to_string(), true)],
-            "SB",
-        );
+        let path = find_hero_decision_path(&tree, &[("BTN".to_string(), true)], "SB");
         assert_eq!(path, Some(vec![1]));
     }
 
@@ -1234,18 +1222,31 @@ mod tests {
         let mut labeled = build_mask_tree(8, &stacks, 150.0, |_, _| [0.0; 169], eight_node);
         apply_short_stack_actions(&mut labeled, &stacks, 150.0);
 
-        let btn = labeled.iter().find(|node| node.player() == "BTN").expect("BU");
+        let btn = labeled
+            .iter()
+            .find(|node| node.player() == "BTN")
+            .expect("BU");
         assert_eq!(btn.action, Action::Call);
         assert!((btn.amount_bb - 1.82).abs() < 0.02);
 
-        let hj = labeled.iter().find(|node| node.player() == "HJ").expect("HJ");
+        let hj = labeled
+            .iter()
+            .find(|node| node.player() == "HJ")
+            .expect("HJ");
         assert_eq!(hj.action, Action::Raise);
         assert!((hj.amount_bb - 5.90).abs() < 0.02);
 
         let hj_kids: Vec<_> = hj
             .children
             .iter()
-            .map(|node| (node.player(), node.action_code(), node.label.clone(), node.children.is_empty()))
+            .map(|node| {
+                (
+                    node.player(),
+                    node.action_code(),
+                    node.label.clone(),
+                    node.children.is_empty(),
+                )
+            })
             .collect();
         assert!(
             hj_kids.iter().any(|(p, a, label, leaf)| {
@@ -1257,7 +1258,9 @@ mod tests {
         let bu_vs_hj = hj
             .children
             .iter()
-            .find(|node| node.player() == "BTN" && node.label.contains("HJ") && !node.label.contains("CO"))
+            .find(|node| {
+                node.player() == "BTN" && node.label.contains("HJ") && !node.label.contains("CO")
+            })
             .expect("BU vs HJ");
         assert_eq!(bu_vs_hj.action, Action::Call);
         assert!((bu_vs_hj.amount_bb - 1.82).abs() < 0.02);
@@ -1279,8 +1282,8 @@ mod tests {
             ],
             "BTN",
         );
-        let unopened = node_at_path(&labeled, &folded_to_bu.expect("unopened BU"))
-            .expect("unopened node");
+        let unopened =
+            node_at_path(&labeled, &folded_to_bu.expect("unopened BU")).expect("unopened node");
         assert_eq!(unopened.player(), "BTN");
         assert_eq!(unopened.action, Action::Call);
         assert!(unopened.label.find("vs").is_none(), "{}", unopened.label);
@@ -1586,4 +1589,3 @@ mod tests {
         assert!((utg.children[1].children[2].amount_bb - 7.03).abs() < 0.02);
     }
 }
-

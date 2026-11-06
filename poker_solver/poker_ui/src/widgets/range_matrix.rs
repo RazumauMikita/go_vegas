@@ -151,8 +151,7 @@ pub fn range_matrix_ui(
     } else {
         egui::Sense::hover()
     };
-    let (grid_rect, grid_response) =
-        ui.allocate_exact_size(egui::vec2(grid_w, grid_h), grid_sense);
+    let (grid_rect, grid_response) = ui.allocate_exact_size(egui::vec2(grid_w, grid_h), grid_sense);
 
     let cell_w = ((grid_rect.width() - GRID_GAP * 12.0) / 13.0).max(1.0);
     let cell_h = ((grid_rect.height() - GRID_GAP * 12.0) / 13.0).max(1.0);
@@ -345,8 +344,10 @@ fn action_bar_ui(ui: &mut egui::Ui, share: f64, width: f32) {
     let fold_w = rect.width() * fold;
     let play_w = rect.width() * play;
     let fold_rect = egui::Rect::from_min_size(rect.min, egui::vec2(fold_w, height));
-    let play_rect =
-        egui::Rect::from_min_size(rect.min + egui::vec2(fold_w, 0.0), egui::vec2(play_w, height));
+    let play_rect = egui::Rect::from_min_size(
+        rect.min + egui::vec2(fold_w, 0.0),
+        egui::vec2(play_w, height),
+    );
 
     ui.painter().rect_filled(fold_rect, 0.0, HRC_FOLD);
     ui.painter().rect_filled(play_rect, 0.0, HRC_GREEN);
