@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+use std::path::PathBuf;
+
 pub mod algorithm;
 pub mod bucketing;
 pub mod card;
@@ -46,3 +48,47 @@ pub use solver::{
 pub use three_way_rank_cache::{
     RankCacheFillStats, ThreeWayRankCache, THREE_WAY_RANK_CACHE_BYTES, THREE_WAY_RANK_CACHE_SIZE,
 };
+
+pub fn find_cache_file(name: &str) -> Option<PathBuf> {
+    let mut candidates = Vec::with_capacity(8);
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join(name));
+            if let Some(target) = dir.parent() {
+                candidates.push(target.join(name));
+                if let Some(root) = target.parent() {
+                    candidates.push(root.join(name));
+                    candidates.push(root.join("poker_ui").join("assets").join(name));
+                }
+            }
+        }
+    }
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    candidates.push(manifest.join(name));
+    candidates.push(manifest.join("..").join(name));
+    candidates.push(
+        manifest
+            .join("..")
+            .join("poker_ui")
+            .join("assets")
+            .join(name),
+    );
+    candidates.push(PathBuf::from(name));
+    candidates.into_iter().find(|path| path.is_file())
+}
+
+#[cfg(test)]
+mod cache_path_tests {
+    #[test]
+    fn finds_project_solver_caches() {
+        for name in [
+            "equity_cache.bin",
+            "bucketing.bin",
+            "three_way_rank_cache.bin",
+            "four_way_rank_cache.bin",
+        ] {
+            let path = super::find_cache_file(name).unwrap_or_else(|| panic!("{name}"));
+            assert!(path.is_file(), "{name}");
+        }
+    }
+}

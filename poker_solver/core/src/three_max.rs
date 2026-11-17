@@ -18,15 +18,24 @@ const THREE_WAY_BOARDS: u64 = 100;
 const THREE_WAY_CACHE_FILE: &str = "three_way_rank_cache.bin";
 
 pub(crate) fn load_three_way_cache() -> ThreeWayRankCache {
+    if let Some(path) = crate::find_cache_file(THREE_WAY_CACHE_FILE) {
+        if let Ok(cache) = ThreeWayRankCache::load(&path) {
+            return cache;
+        }
+    }
     ThreeWayRankCache::load_or_embedded(Path::new(THREE_WAY_CACHE_FILE))
         .unwrap_or_else(|_| ThreeWayRankCache::new())
 }
 
 pub(crate) fn persist_three_way_cache(ctx: &ThreeMaxContext) {
-    if ctx.cache_misses() > 0 {
-        if let Err(error) = ctx.three_way.save(Path::new(THREE_WAY_CACHE_FILE)) {
-            eprintln!("failed to save 3-way rank cache: {error}");
-        }
+    if ctx.cache_misses() == 0 {
+        return;
+    }
+    let Some(path) = crate::find_cache_file(THREE_WAY_CACHE_FILE) else {
+        return;
+    };
+    if let Err(error) = ctx.three_way.save(&path) {
+        eprintln!("failed to save 3-way rank cache: {error}");
     }
 }
 

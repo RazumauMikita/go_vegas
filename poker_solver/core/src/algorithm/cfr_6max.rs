@@ -1700,18 +1700,7 @@ fn load_four_way() -> Option<FourWayRankCache> {
 }
 
 fn find_file(name: &str) -> Option<PathBuf> {
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let candidates = [
-        PathBuf::from(name),
-        manifest.join(name),
-        manifest.join("..").join(name),
-        manifest
-            .join("..")
-            .join("poker_ui")
-            .join("assets")
-            .join(name),
-    ];
-    candidates.into_iter().find(|path| path.is_file())
+    crate::find_cache_file(name)
 }
 
 fn card_mask(hand: [Card; 2]) -> u64 {
